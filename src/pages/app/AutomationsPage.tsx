@@ -1,0 +1,170 @@
+import { Plus, Zap } from 'lucide-react'
+import { PageHeader } from '../../components/app/AppLayout'
+import { Button } from '../../components/ui/Button'
+import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
+import { StatusPill } from '../../components/ui/Status'
+import { Toggle } from '../../components/ui/Tabs'
+import { useState } from 'react'
+
+interface Automation {
+  id: string
+  name: string
+  trigger: string
+  action: string
+  scope: string
+  enabled: boolean
+  runs: number
+}
+
+const initial: Automation[] = [
+  {
+    id: 'auto-404',
+    name: 'Fix broken internal links',
+    trigger: 'Monitor Agent detects an internal 404',
+    action: 'Update link target to the replacement URL, then verify',
+    scope: 'All websites',
+    enabled: true,
+    runs: 42,
+  },
+  {
+    id: 'auto-meta',
+    name: 'Add missing meta descriptions',
+    trigger: 'SEO Agent finds a page without description',
+    action: 'Insert generated description, queue for review',
+    scope: 'All websites',
+    enabled: true,
+    runs: 27,
+  },
+  {
+    id: 'auto-image',
+    name: 'Optimize oversized images',
+    trigger: 'Performance Agent detects LCP regression from an image',
+    action: 'Convert to WebP with responsive srcset',
+    scope: 'Pro and Agency sites',
+    enabled: false,
+    runs: 9,
+  },
+  {
+    id: 'auto-deploy',
+    name: 'Verify after every deploy',
+    trigger: 'Deployment webhook received',
+    action: 'Run full scan, compare snapshots, open issues on regression',
+    scope: 'All websites',
+    enabled: true,
+    runs: 118,
+  },
+  {
+    id: 'auto-report',
+    name: 'Weekly client report',
+    trigger: 'Every Monday, 08:00',
+    action: 'Generate and email a white-label health report',
+    scope: 'Client reports',
+    enabled: true,
+    runs: 14,
+  },
+]
+
+export default function AutomationsPage() {
+  const [rules, setRules] = useState(initial)
+
+  const toggle = (id: string, value: boolean) =>
+    setRules((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: value } : r)))
+
+  return (
+    <>
+      <PageHeader
+        title="Automations"
+        subtitle="Let approved AI fixes run without waiting — you stay in control"
+        actions={
+          <Button>
+            <Plus className="size-4" />
+            New automation
+          </Button>
+        }
+      />
+
+      <div className="mb-5 flex items-start gap-3 rounded-lg border border-accent/20 bg-accent-tint-soft px-4 py-3.5">
+        <Zap className="mt-0.5 size-4 shrink-0 text-accent" />
+        <p className="text-[13px] leading-relaxed text-ink-soft">
+          <span className="font-semibold text-ink">How automations work.</span> Each rule only fires
+          when the matching agent detects a problem. The Fix Agent prepares a correction, your rule
+          decides whether it runs automatically or waits for approval, and Monitor Agent verifies the
+          result before an issue is marked resolved.
+        </p>
+      </div>
+
+      <div className="space-y-4">
+        {rules.map((rule) => (
+          <Panel key={rule.id}>
+            <div className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h3 className="text-sm font-semibold text-ink">{rule.name}</h3>
+                  <StatusPill tone={rule.enabled ? 'healthy' : 'neutral'}>
+                    {rule.enabled ? 'Enabled' : 'Paused'}
+                  </StatusPill>
+                </div>
+                <dl className="mt-2.5 grid gap-1.5 text-[13px] sm:grid-cols-2">
+                  <div className="flex gap-2">
+                    <dt className="w-16 shrink-0 text-ink-faint">When</dt>
+                    <dd className="text-ink-soft">{rule.trigger}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-16 shrink-0 text-ink-faint">Then</dt>
+                    <dd className="text-ink-soft">{rule.action}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="flex items-center justify-between gap-6 border-t border-line pt-4 lg:justify-end lg:border-t-0 lg:pt-0">
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-ink tabular-nums">{rule.runs}</p>
+                  <p className="text-[11px] text-ink-faint">runs</p>
+                </div>
+                <div className="w-44">
+                  <p className="mb-1 truncate text-xs text-ink-muted">{rule.scope}</p>
+                  <Toggle
+                    checked={rule.enabled}
+                    onChange={(v) => toggle(rule.id, v)}
+                    label=""
+                    description=""
+                  />
+                </div>
+              </div>
+            </div>
+          </Panel>
+        ))}
+      </div>
+
+      <Panel className="mt-6">
+        <PanelHeader title="Approval policy" subtitle="Applied to every automation" />
+        <PanelBody className="grid gap-x-8 gap-y-1 sm:grid-cols-2">
+          <Toggle
+            checked
+            onChange={() => undefined}
+            label="Require approval below 95% confidence"
+            description="Low-confidence fixes always wait for a human."
+          />
+          <Toggle
+            checked
+            onChange={() => undefined}
+            label="Never touch forms or checkout"
+            description="Revenue-critical flows are excluded from auto-fix."
+          />
+          <Toggle
+            checked={false}
+            onChange={() => undefined}
+            label="Allow automatic plugin rollbacks"
+            description="Requires owner permission."
+          />
+          <Toggle
+            checked
+            onChange={() => undefined}
+            label="Verify every fix after applying"
+            description="Monitor Agent re-tests before closing an issue."
+          />
+        </PanelBody>
+      </Panel>
+    </>
+  )
+}

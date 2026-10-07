@@ -1,0 +1,272 @@
+@import 'tailwindcss';
+
+/*
+  SiteGuard AI — design system
+  Direction: Linear / Vercel / Stripe / Raycast / Datadog hybrid.
+  Neutral base + one accent (electric cobalt) + conventional status colors.
+*/
+
+@theme {
+  /* -- surfaces -- */
+  --color-canvas: #f9f9f9;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f4f4f5;
+  --color-line: #e9e9ec;
+  --color-line-strong: #dcdce1;
+
+  /* -- ink -- */
+  --color-ink: #1a1c1c;
+  --color-ink-soft: #4f5663;
+  --color-ink-muted: #656464;
+  --color-ink-faint: #9ca3af;
+
+  /* -- accent (single action color) -- */
+  --color-accent: #1f5eff;
+  --color-accent-hover: #0046d4;
+  --color-accent-tint: #ecf1ff;
+  --color-accent-tint-soft: #f4f6ff;
+  --color-accent-soft: #b6c4ff;
+
+  /* -- status -- */
+  --color-healthy: #16a34a;
+  --color-healthy-tint: #ecfdf3;
+  --color-warning: #d97706;
+  --color-warning-tint: #fff7ed;
+  --color-critical: #dc2626;
+  --color-critical-tint: #fff1f1;
+  --color-info: #2563eb;
+  --color-info-tint: #eff6ff;
+
+  /* -- type -- */
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* -- shape -- */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* -- shadow -- */
+  --shadow-card: 0 1px 2px 0 rgb(16 24 40 / 0.04);
+  --shadow-pop: 0 8px 24px -8px rgb(16 24 40 / 0.12), 0 0 0 1px rgb(16 24 40 / 0.03);
+  --shadow-hero: 0 24px 64px -24px rgb(16 24 40 / 0.18);
+
+  /* -- motion -- */
+  --animate-fade-up: fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-in: fade-in 0.4s ease both;
+  --animate-pulse-dot: pulse-dot 1.8s ease-in-out infinite;
+  --animate-scan: scan 1.4s ease-in-out infinite;
+  --animate-sweep: sweep 2.2s linear infinite;
+  --animate-blink: blink 1.1s step-end infinite;
+  --animate-spin-slow: spin 9s linear infinite;
+  --animate-rise: rise 0.75s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-marquee: marquee 42s linear infinite;
+  --animate-float: float 7s ease-in-out infinite;
+  --animate-float-late: float 7s ease-in-out 1.4s infinite;
+  --animate-orb-a: orb-a 24s ease-in-out infinite alternate;
+  --animate-orb-b: orb-b 19s ease-in-out infinite alternate;
+  --animate-glow-pulse: glow-pulse 3.4s ease-in-out infinite;
+  --animate-grow-x: grow-x 1.1s cubic-bezier(0.16, 1, 0.3, 1) both;
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 rgb(31 94 255 / 0.35);
+    }
+    50% {
+      box-shadow: 0 0 0 5px rgb(31 94 255 / 0);
+    }
+  }
+  @keyframes scan {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+  @keyframes sweep {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(110%);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes marquee {
+    from {
+      transform: translate3d(0, 0, 0);
+    }
+    to {
+      transform: translate3d(-50%, 0, 0);
+    }
+  }
+  @keyframes float {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+  @keyframes orb-a {
+    from {
+      transform: translate3d(-6%, 0, 0) scale(1);
+    }
+    to {
+      transform: translate3d(8%, 12%, 0) scale(1.18);
+    }
+  }
+  @keyframes orb-b {
+    from {
+      transform: translate3d(0, 0, 0) scale(1.05);
+    }
+    to {
+      transform: translate3d(-14%, -10%, 0) scale(0.92);
+    }
+  }
+  @keyframes glow-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 rgb(31 94 255 / 0.24);
+    }
+    50% {
+      box-shadow: 0 0 28px 4px rgb(31 94 255 / 0.16);
+    }
+  }
+  @keyframes grow-x {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: scaleX(1);
+    }
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    scroll-behavior: smooth;
+  }
+
+  section[id] {
+    scroll-margin-top: 72px;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  ::selection {
+    background-color: var(--color-accent-tint);
+    color: var(--color-accent-hover);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+}
+
+/* Mobile-first container: 16px gutters, 24px from sm up */
+@utility container-page {
+  margin-inline: auto;
+  width: 100%;
+  max-width: 1200px;
+  padding-inline: 16px;
+}
+
+@media (min-width: 640px) {
+  .container-page {
+    padding-inline: 24px;
+  }
+}
+
+@utility text-balance-work {
+  text-wrap: balance;
+}
+
+@utility hairline-t {
+  border-top: 1px solid var(--color-line);
+}
+
+/* Thin custom scrollbars — precise instrument feel */
+@layer utilities {
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: var(--color-line-strong);
+    border-radius: 999px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
