@@ -1,11 +1,14 @@
-import { Activity, ArrowRight, Check, Radio } from 'lucide-react'
+import { Activity, ArrowRight, Check, Radio, Play, Square } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PageHeader } from '../../components/app/AppLayout'
 import { Button } from '../../components/ui/Button'
 import { Sparkline } from '../../components/ui/Metric'
 import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { StatusPill } from '../../components/ui/Status'
-import { agents, activity } from '../../data/mock'
+import { api } from '../../lib/api'
+import RequireSubscription from '../../components/RequireSubscription'
+
 
 const icons: Record<string, string> = {
   monitor: '◎',
