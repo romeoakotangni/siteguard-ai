@@ -19,7 +19,7 @@
     }
   ],
   "functions": {
-    "api/**/*.ts": {
+    "api/**/*.{js,ts}": {
       "maxDuration": 60
     }
   }
