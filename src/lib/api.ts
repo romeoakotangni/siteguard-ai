@@ -35,6 +35,9 @@ export const api = {
   agents: {
     list: () => request('/agents/list'),
     create: (payload: { name: string; type: string; config?: any }) => request('/agents/create', { method: 'POST', body: JSON.stringify(payload) }),
+    run: (agentId?: string, agentType?: string, payload?: any) => request('/agents/run', { method: 'POST', body: JSON.stringify({ agentId, agentType, payload }) }),
+    stop: (agentId: string) => request('/agents/stop', { method: 'POST', body: JSON.stringify({ agentId }) }),
+    status: () => request('/agents/status'),
   },
   db: {
     status: () => request('/db/status'),
