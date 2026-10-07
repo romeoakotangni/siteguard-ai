@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, Check, Play, Radio, Square } from 'lucide-react'
+import { ArrowRight, Check, Play, Radio, Square } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PageHeader } from '../../components/app/AppLayout'

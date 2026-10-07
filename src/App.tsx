@@ -50,3 +50,13 @@ export default function App() {
     </>
   )
 }
+
+import ReportsPage from './pages/app/ReportsPage'
+
+import ActivityPage from './pages/app/ActivityPage'
+
+import NotificationsPage from './pages/app/NotificationsPage'
+
+import SettingsPage from './pages/app/SettingsPage'
+
+import BillingPage from './pages/app/BillingPage'
