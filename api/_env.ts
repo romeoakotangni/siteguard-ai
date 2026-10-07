@@ -27,3 +27,11 @@ export function getJwtSecret(): string {
 export function getSessionSecret(): string {
   return getEnv('SESSION_SECRET') || getEnv('JWT_SECRET') || crypto.randomUUID();
 }
+
+export function getOpenRouterKey(): string | undefined {
+  return getEnv('OPENROUTER_API_KEY');
+}
+
+export function getDefaultModel(): string {
+  return getEnv('DEFAULT_AGENT_MODEL', 'anthropic/claude-3.5-sonnet') || 'anthropic/claude-3.5-sonnet';
+}
