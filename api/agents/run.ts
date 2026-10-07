@@ -28,6 +28,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const workspaceId = ws.rows[0]?.id;
     if (!workspaceId) return bad(res, 'Workspace introuvable', 404);
 
+    const { requireSubscription } = await import('../utils/requireSubscription');
+    const wsId = workspaceId as string | null;
+    if (!(await requireSubscription(req, res, user, wsId))) return;
+
     if (agentId) {
       const a = await sql`SELECT id,type,status FROM agents WHERE id=${agentId} AND workspace_id=${workspaceId}`;
       if (a.rows.length === 0) return bad(res, 'Agent introuvable', 404);
