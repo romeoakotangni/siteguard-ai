@@ -12,11 +12,7 @@ import IssuesPage from './pages/app/IssuesPage'
 import IssueDetailPage from './pages/app/IssueDetailPage'
 import AgentsPage from './pages/app/AgentsPage'
 import AutomationsPage from './pages/app/AutomationsPage'
-import ReportsPage from './pages/app/ReportsPage'
-import ActivityPage from './pages/app/ActivityPage'
-import NotificationsPage from './pages/app/NotificationsPage'
-import SettingsPage from './pages/app/SettingsPage'
-import BillingPage from './pages/app/BillingPage'
+import ProtectedRoute from './components/ProtectedRoute'
 
 function ScrollToTop() {
   const { pathname } = useLocation()
@@ -35,7 +31,7 @@ export default function App() {
         <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
-        <Route path="/app" element={<AppLayout />}>
+        <Route path="/app" element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
           <Route index element={<DashboardPage />} />
           <Route path="websites" element={<WebsitesPage />} />
           <Route path="websites/:siteId" element={<WebsiteDetailPage />} />
