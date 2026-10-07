@@ -111,10 +111,15 @@ async function hasActiveSubscription(userId) {
   return r.rows.length > 0;
 }
 
+let lastProviderError = null;
+
 async function callOpenRouter(prompt) {
   const key = env('OPENROUTER_API_KEY');
-  if (!key) return null;
-  const model = env('DEFAULT_AGENT_MODEL', 'anthropic/claude-3.5-sonnet');
+  if (!key) {
+    lastProviderError = 'OPENROUTER_API_KEY manquante';
+    return null;
+  }
+  const model = env('DEFAULT_AGENT_MODEL', 'nvidia/nemotron-3-ultra-550b-a55b:free');
   try {
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -131,15 +136,25 @@ async function callOpenRouter(prompt) {
           { role: 'user', content: prompt },
         ],
         temperature: 0.3,
-        max_tokens: 800,
+        max_tokens: 2000,
       }),
     });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      lastProviderError = `OpenRouter HTTP ${r.status}: ${text.slice(0, 200)}`;
+      return null;
+    }
     const data = await r.json();
-    const output = data?.choices?.[0]?.message?.content || '';
-    if (!output) return null;
+    const msg = data?.choices?.[0]?.message;
+    let output = (msg?.content || '').trim();
+    if (!output && msg?.reasoning) output = `[reasoning] ${String(msg.reasoning).trim().slice(0, 1500)}`;
+    if (!output) {
+      lastProviderError = `OpenRouter: reponse vide (finish=${data?.choices?.[0]?.finish_reason})`;
+      return null;
+    }
     return { output, model, usage: data?.usage };
-  } catch {
+  } catch (e) {
+    lastProviderError = `OpenRouter exception: ${e?.message || String(e)}`;
     return null;
   }
 }
@@ -165,7 +180,7 @@ Payload: ${JSON.stringify(payload || {})}
 Task: Analyze and return structured findings (JSON-like with findings[], actions[], confidence).`;
   const res = await callOpenRouter(prompt);
   if (res) return { ok: true, provider: 'openrouter', model: res.model, output: res.output, usage: res.usage };
-  return { ok: true, provider: 'fallback', model: 'heuristic', output: fallbackOutput(prompt) };
+  return { ok: true, provider: 'fallback', model: 'heuristic', output: fallbackOutput(prompt), debug: lastProviderError };
 }
 
 const SCHEMA_SQL = `
