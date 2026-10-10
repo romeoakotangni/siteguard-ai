@@ -111,6 +111,37 @@ async function hasActiveSubscription(userId) {
   return r.rows.length > 0;
 }
 
+const DEFAULT_AGENTS = [
+  { name: 'Monitor Agent', type: 'monitor', config: { role: 'Watches availability, HTTP errors and downtime.', scope: 'Every 60 seconds' } },
+  { name: 'Performance Agent', type: 'performance', config: { role: 'Tracks load speed and Core Web Vitals.', scope: 'Every hour' } },
+  { name: 'SEO Agent', type: 'seo', config: { role: 'Audits sitemap, robots.txt, metadata and structure.', scope: 'Daily' } },
+  { name: 'Form Agent', type: 'form', config: { role: 'Tests forms end-to-end with real submissions.', scope: 'Every 6 hours' } },
+  { name: 'Security Agent', type: 'security', config: { role: 'Monitors headers, exposure and basic threats.', scope: 'Every hour' } },
+  { name: 'Fix Agent', type: 'fix', config: { role: 'Prepares corrections and verifies applied fixes.', scope: 'On demand' } },
+];
+
+const DEFAULT_AUTOMATIONS = [
+  { name: 'Fix broken internal links', trigger: 'monitor_404', action: { kind: 'update_link' }, enabled: true },
+  { name: 'Verify after every deploy', trigger: 'deploy_webhook', action: { kind: 'full_scan' }, enabled: true },
+  { name: 'Optimize oversized images', trigger: 'performance_lcp', action: { kind: 'webp' }, enabled: false },
+  { name: 'Weekly client report', trigger: 'weekly', action: { kind: 'report_email' }, enabled: true },
+];
+
+async function seedWorkspaceData(workspaceId) {
+  const has = await sql`SELECT 1 FROM agents WHERE workspace_id=${workspaceId} LIMIT 1`;
+  if (has.rows.length === 0) {
+    for (const a of DEFAULT_AGENTS) {
+      await sql`INSERT INTO agents (workspace_id, name, type, config, status) VALUES (${workspaceId}, ${a.name}, ${a.type}, ${JSON.stringify(a.config)}::JSONB, 'idle')`;
+    }
+  }
+  const hasAuto = await sql`SELECT 1 FROM automations WHERE workspace_id=${workspaceId} LIMIT 1`;
+  if (hasAuto.rows.length === 0) {
+    for (const r of DEFAULT_AUTOMATIONS) {
+      await sql`INSERT INTO automations (workspace_id, name, enabled, trigger, action) VALUES (${workspaceId}, ${r.name}, ${r.enabled}, ${r.trigger}, ${JSON.stringify(r.action)}::JSONB)`;
+    }
+  }
+}
+
 let lastProviderError = null;
 
 async function callOpenRouter(prompt) {
@@ -123,6 +154,7 @@ async function callOpenRouter(prompt) {
   try {
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
+      signal: AbortSignal.timeout(20000),
       headers: {
         Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
@@ -352,6 +384,14 @@ CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_transaction_id ON payments(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS client TEXT;
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'Starter';
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS connected_at TIMESTAMPTZ;
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS uptime TEXT DEFAULT '—';
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS response_ms INTEGER DEFAULT 0;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS payload JSONB;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS fingerprint TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_fingerprint ON issues(fingerprint) WHERE fingerprint IS NOT NULL;
 `;
 
 const requireMethod = (req, res, method) => {
@@ -391,6 +431,7 @@ async function register(req, res) {
 
     const token = signToken(user);
     setAuthCookie(res, token);
+    await seedWorkspaceData(workspace.rows[0].id);
     return OK(
       res,
       { user: { id: user.id, name: user.name, email: user.email, role: user.role }, token, workspace: workspace.rows[0] },
@@ -648,6 +689,10 @@ async function agentStop(req, res) {
 async function dbMigrate(req, res) {
   try {
     await sql.query(SCHEMA_SQL);
+    const ws = await sql`SELECT id FROM workspaces`;
+    for (const w of ws.rows) {
+      await seedWorkspaceData(w.id);
+    }
     return OK(res, { migrated: true });
   } catch (e) {
     return KO(res, e?.message || 'Migration failed', 500);
@@ -672,6 +717,1047 @@ async function dbTest(req, res) {
   }
 }
 
+function normalizeDomain(input) {
+  let raw = String(input || '').trim().toLowerCase();
+  raw = raw.replace(/^https?:\/\//i, '');
+  raw = raw.replace(/^www\./i, '');
+  raw = raw.split(/[/?#]/)[0];
+  return raw;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function decodeEntities(s) {
+  if (!s) return '';
+  const map = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" };
+  return String(s).replace(/&([^;]+);/g, (m, e) => (map[e.toLowerCase()] !== undefined ? map[e.toLowerCase()] : m));
+}
+
+function metaOf(body, name) {
+  if (!body) return null;
+  const re = new RegExp(`<meta[^>]+(?:name|property)=["']${name}["'][^>]*>`, 'i');
+  const m = body.match(re);
+  if (m) {
+    const c = m[0].match(/content=["']([^"']*)["']/i);
+    if (c) return decodeEntities(c[1]).trim();
+  }
+  const re2 = new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:name|property)=["']${name}["'][^>]*>`, 'i');
+  const m2 = body.match(re2);
+  return m2 ? decodeEntities(m2[1]).trim() : null;
+}
+
+function countOcc(body, re) {
+  if (!body) return 0;
+  return (body.match(re) || []).length;
+}
+
+async function fetchPage(url) {
+  const started = Date.now();
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15000),
+      headers: {
+        'User-Agent': 'SiteGuardAI-Bot/1.0 (+https://siteguard-ai-seven.vercel.app)',
+        Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+      },
+    });
+    const durationMs = Date.now() - started;
+    const contentType = res.headers.get('content-type') || '';
+    let body = '';
+    const isHtml = contentType.includes('text/html') || /\.html?$/i.test(url);
+    if (isHtml) {
+      const buf = new Uint8Array(await res.arrayBuffer());
+      body = new TextDecoder('utf-8', { fatal: false }).decode(buf).slice(0, 700000);
+    }
+    const headers = {};
+    res.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
+    return { status: res.status, statusText: res.statusText, finalUrl: res.url, durationMs, contentType, headers, body };
+  } catch (e) {
+    return { error: e?.name === 'TimeoutError' ? 'timeout' : String(e?.message || e), durationMs: Date.now() - started };
+  }
+}
+
+async function fetchAux(domain, path) {
+  try {
+    const res = await fetch(`https://${domain}${path}`, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(7000),
+      headers: { 'User-Agent': 'SiteGuardAI-Bot/1.0 (+https://siteguard-ai-seven.vercel.app)' },
+    });
+    const text = await res.text().catch(() => '');
+    return { status: res.status, text: text.slice(0, 40000) };
+  } catch (e) {
+    return { status: 0, text: '', error: String(e?.message || e) };
+  }
+}
+
+function analyzeHtml(body) {
+  const title = ((body || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1]?.replace(/\s+/g, ' ').trim() || '';
+  const imgs = (body || '').match(/<img[\s>]/gi) || [];
+  const forms = (body || '').match(/<form[\s>][^>]*>/gi) || [];
+  const faviconMatch = /<link[^>]*rel=["'](?:shortcut )?icon["']/i.test(body || '');
+  const langAttr = ((body || '').match(/<html[^>]*\blang=["']?([a-zA-Z-]+)/i) || [])[1] || '';
+  return {
+    title,
+    description: metaOf(body, 'description'),
+    ogTitle: metaOf(body, 'og:title'),
+    ogDesc: metaOf(body, 'og:description'),
+    ogImage: metaOf(body, 'og:image'),
+    viewport: metaOf(body, 'viewport'),
+    h1s: countOcc(body, /<h1[\s>]/gi),
+    imgs: imgs.length,
+    imgsNoAlt: countOcc(body, /<img(?![^>]*\balt=)[^>]*>/gi),
+    links: countOcc(body, /<a[\s>]/gi),
+    forms: forms.length,
+    formsNoAction: forms.filter((f) => !/action=["']?[^"'\s>]/.test(f)).length,
+    scripts: countOcc(body, /<script[\s>]/gi),
+    inlineScripts: countOcc(body, /<script(?![^>]*\bsrc=)[^>]*>/gi),
+    stylesheets: countOcc(body, /<link[^>]*rel=["']stylesheet["']/gi),
+    inputsEmail: countOcc(body, /type=["']email["']/gi),
+    langAttr,
+    byteSize: Buffer.byteLength(body || '', 'utf8'),
+    favicon: faviconMatch,
+    hreflang: countOcc(body, /hreflang=/gi),
+  };
+}
+
+function securityChecks(headers) {
+  const h = headers || {};
+  const csp = h['content-security-policy'] || h['content-security-policy-report-only'] || '';
+  return {
+    hsts: !!h['strict-transport-security'],
+    csp: !!csp,
+    nosniff: (h['x-content-type-options'] || '').toLowerCase().includes('nosniff'),
+    xfo: /deny|sameorigin/i.test(h['x-frame-options'] || '') || /frame-ancestors/i.test(csp),
+    referrerPolicy: !!h['referrer-policy'],
+    permissionsPolicy: !!h['permissions-policy'] || !!h['feature-policy'],
+    server: h['server'] || '',
+    poweredBy: h['x-powered-by'] || '',
+  };
+}
+
+function makeTimeline(detectedAt, agent, label) {
+  const t = fmtTime(detectedAt);
+  return [
+    { time: t, agent, label, state: 'done' },
+    { time: t, agent: 'AI diagnosis', label: 'Root cause identified', state: 'done' },
+    { time: t, agent: 'Fix Agent', label: 'Correction generated · confidence high', state: 'done' },
+    { time: '—', agent: 'Workflow', label: 'Waiting for your approval', state: 'current' },
+    { time: '—', agent: 'Fix Agent', label: 'Apply correction', state: 'pending' },
+    { time: '—', agent, label: 'Verify fix · confirm healthy', state: 'pending' },
+    { time: '—', agent: 'Workflow', label: 'Issue resolved', state: 'pending' },
+  ];
+}
+
+function dbSeverity(sev) {
+  if (sev === 'critical') return 'critical';
+  if (sev === 'warning') return 'high';
+  return 'low';
+}
+
+function makeFinding(site, data) {
+  const detectedAt = nowIso();
+  return {
+    key: data.key,
+    title: data.title,
+    severity: data.severity,
+    category: data.category,
+    status: 'open',
+    siteId: site.id,
+    path: data.path || '/',
+    impact: data.impact || 'Medium',
+    detectedAt,
+    detectedBy: data.agent || 'Monitor Agent',
+    diagnosis: data.diagnosis || 'Issue detected during automated audit.',
+    evidence: data.evidence || [],
+    recommendedFix: data.recommendedFix || 'Review and apply the recommended correction.',
+    fixDetail: data.fixDetail || '',
+    confidence: data.confidence ?? 85,
+    before: data.before || { label: 'Before', value: 'not healthy', tone: 'critical' },
+    after: data.after || { label: 'After', value: 'healthy', tone: 'healthy' },
+    affectedPages: data.affectedPages ?? 1,
+    seoImpact: data.seoImpact || 'None',
+    autoFixable: Boolean(data.autoFixable),
+    timeline: makeTimeline(detectedAt, data.agent || 'Monitor Agent', data.timelineLabel || data.title),
+    domain: site.domain,
+  };
+}
+
+function buildFindings(site, metrics) {
+  const { page, html, sec, robots, sitemap, domain, durationMs } = metrics;
+  const findings = [];
+  const f = (d) => findings.push(makeFinding(site, d));
+
+  if (!page || page.error || page.status === 0) {
+    f({
+      key: 'reachability',
+      agent: 'Monitor Agent',
+      category: 'Monitoring',
+      title: 'Website unreachable',
+      severity: 'critical',
+      impact: 'High',
+      evidence: [{ label: `GET https://${domain}`, value: page?.error === 'timeout' ? 'timeout (15s)' : page && page.status ? `HTTP ${page.status}` : 'connection error' }],
+      diagnosis: 'The site did not respond to an HTTPS request within the timeout. Visitors cannot reach the website, which directly impacts revenue, leads and SEO.',
+      recommendedFix: 'Check DNS records, hosting status and origin server health.',
+      fixDetail: 'Verify A/AAAA record for ' + domain + ', hosting incident page, and that the origin does not block automated requests.',
+      confidence: 92,
+      autoFixable: false,
+      seoImpact: 'High',
+    });
+  } else if (page.status >= 500 || page.status === 429) {
+    f({
+      key: 'server_error',
+      agent: 'Monitor Agent',
+      category: 'Monitoring',
+      title: `Server error: HTTP ${page.status}`,
+      severity: 'critical',
+      impact: 'High',
+      evidence: [{ label: `GET https://${domain}`, value: `HTTP ${page.status}` }, { label: 'Status text', value: page.statusText || '—' }],
+      diagnosis: `The homepage returned HTTP ${page.status}. This is a server-side failure affecting all visitors and search engines.`,
+      recommendedFix: 'Investigate origin logs and deploy a fix.',
+      fixDetail: `HTTP ${page.status} from https://${domain} — check hosting status and application error logs.`,
+      confidence: 90,
+      autoFixable: false,
+      seoImpact: 'High',
+    });
+  } else if (page.status >= 400 && page.status !== 404) {
+    f({
+      key: 'client_error',
+      agent: 'Monitor Agent',
+      category: 'Monitoring',
+      title: `Homepage error: HTTP ${page.status}`,
+      severity: 'warning',
+      impact: 'Medium',
+      evidence: [{ label: `GET https://${domain}`, value: `HTTP ${page.status}` }],
+      diagnosis: `The homepage returned HTTP ${page.status}. The page may still load if a redirect or CDN fallback exists but this needs review.`,
+      recommendedFix: 'Check the endpoint configuration and redirects.',
+      fixDetail: `HTTP ${page.status} on https://${domain} — verify routing and caching rules.`,
+      confidence: 85,
+      autoFixable: false,
+      seoImpact: 'Medium',
+    });
+  }
+
+  if (durationMs > 2200) {
+    f({
+      key: 'ttfb_slow',
+      agent: 'Performance Agent',
+      category: 'Performance',
+      title: 'Very slow response time',
+      severity: 'warning',
+      impact: 'Medium',
+      evidence: [{ label: 'Response time', value: `${Math.round(durationMs)} ms` }, { label: 'Recommendation', value: '< 2000 ms' }],
+      diagnosis: `The page took ${Math.round(durationMs)} ms to respond. Slow TTFB degrades Core Web Vitals (LCP) and user experience on mobile.`,
+      recommendedFix: 'Enable caching, use a CDN, and optimize the origin.',
+      fixDetail: 'Add page/asset caching and a CDN; profile slow queries on the origin.',
+      confidence: 88,
+      autoFixable: false,
+      seoImpact: 'Medium',
+    });
+  } else if (durationMs > 1200) {
+    f({
+      key: 'ttfb_ok',
+      agent: 'Performance Agent',
+      category: 'Performance',
+      title: 'Response time above target',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'Response time', value: `${Math.round(durationMs)} ms` }],
+      diagnosis: `Response time of ${Math.round(durationMs)} ms is acceptable but above the 1200 ms target.`,
+      recommendedFix: 'Optimize caching and server configuration.',
+      fixDetail: 'Enable compression, cache static assets, tune server timeouts.',
+      confidence: 80,
+      autoFixable: true,
+      seoImpact: 'Low',
+    });
+  }
+
+  if (html.byteSize > 1000000) {
+    f({
+      key: 'html_heavy',
+      agent: 'Performance Agent',
+      category: 'Performance',
+      title: 'Large HTML payload',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'HTML size', value: `${(html.byteSize / 1024).toFixed(0)} KB` }],
+      diagnosis: `The HTML document weighs ~${(html.byteSize / 1024).toFixed(0)} KB. Large documents slow down parsing and render on low-end devices.`,
+      recommendedFix: 'Trim inline assets and server-render only critical content.',
+      fixDetail: 'Move inline scripts/styles to external files and paginate long content.',
+      confidence: 84,
+      autoFixable: true,
+      seoImpact: 'Low',
+    });
+  }
+
+  if (!sec.hsts) {
+    f({
+      key: 'hsts',
+      agent: 'Security Agent',
+      category: 'Security',
+      title: 'Missing HSTS header',
+      severity: 'warning',
+      impact: 'Medium',
+      evidence: [{ label: 'Strict-Transport-Security', value: 'absent' }],
+      diagnosis: 'The Strict-Transport-Security header is not sent. HTTPS can be downgraded on hostile networks.',
+      recommendedFix: 'Add the header at the edge:',
+      fixDetail: 'Strict-Transport-Security: max-age=31536000; includeSubDomains',
+      confidence: 99,
+      autoFixable: true,
+    });
+  }
+
+  if (!sec.csp) {
+    f({
+      key: 'csp',
+      agent: 'Security Agent',
+      category: 'Security',
+      title: 'No Content-Security-Policy',
+      severity: 'warning',
+      impact: 'Medium',
+      evidence: [{ label: 'Content-Security-Policy', value: 'absent' }],
+      diagnosis: 'No Content-Security-Policy header detected, increasing the risk of XSS and data injection attacks.',
+      recommendedFix: 'Serve a reporting CSP first, then enforce:',
+      fixDetail: 'Content-Security-Policy: default-src \'self\'; base-uri \'self\'; frame-ancestors \'self\'',
+      confidence: 96,
+      autoFixable: true,
+    });
+  }
+
+  if (!sec.nosniff) {
+    f({
+      key: 'nosniff',
+      agent: 'Security Agent',
+      category: 'Security',
+      title: 'Missing X-Content-Type-Options',
+      severity: 'warning',
+      impact: 'Low',
+      evidence: [{ label: 'X-Content-Type-Options', value: 'absent' }],
+      diagnosis: 'The X-Content-Type-Options: nosniff header is missing, allowing some browsers to MIME-sniff responses.',
+      recommendedFix: 'Add the header:',
+      fixDetail: 'X-Content-Type-Options: nosniff',
+      confidence: 99,
+      autoFixable: true,
+    });
+  }
+
+  if (!sec.xfo) {
+    f({
+      key: 'xfo',
+      agent: 'Security Agent',
+      category: 'Security',
+      title: 'Clickjacking protection missing',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'X-Frame-Options / frame-ancestors', value: 'absent' }],
+      diagnosis: 'No clickjacking protection header or CSP frame-ancestors directive was detected.',
+      recommendedFix: 'Add the header or CSP directive:',
+      fixDetail: 'X-Frame-Options: SAMEORIGIN  (or frame-ancestors \'self\')',
+      confidence: 98,
+      autoFixable: true,
+    });
+  }
+
+  if (!sec.referrerPolicy) {
+    f({
+      key: 'referrer_policy',
+      agent: 'Security Agent',
+      category: 'Security',
+      title: 'Referrer-Policy not set',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'Referrer-Policy', value: 'absent' }],
+      diagnosis: 'The Referrer-Policy header is not set, so full URLs may leak in the Referer header.',
+      recommendedFix: 'Add the header:',
+      fixDetail: 'Referrer-Policy: strict-origin-when-cross-origin',
+      confidence: 97,
+      autoFixable: true,
+    });
+  }
+
+  if (sec.poweredBy) {
+    f({
+      key: 'powered_by',
+      agent: 'Security Agent',
+      category: 'Security',
+      title: 'Technology stack exposed',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'X-Powered-By', value: sec.poweredBy }],
+      diagnosis: `The ${sec.poweredBy} value is exposed in response headers, revealing the technology stack to attackers.`,
+      recommendedFix: 'Remove the header server-side.',
+      fixDetail: 'Disable X-Powered-By / Server version output.',
+      confidence: 95,
+      autoFixable: false,
+    });
+  }
+
+  if (!html.title) {
+    f({
+      key: 'missing_title',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'Missing <title> tag',
+      severity: 'warning',
+      impact: 'Medium',
+      evidence: [{ label: '<title>', value: 'missing' }],
+      diagnosis: 'The page has no <title> tag. Search engines use the title as the primary clickable headline in results.',
+      recommendedFix: 'Add a descriptive title:',
+      fixDetail: `<title>${site.name || domain} — official website</title>`,
+      confidence: 92,
+      autoFixable: true,
+      seoImpact: 'Medium',
+    });
+  }
+
+  if (!html.description) {
+    f({
+      key: 'missing_description',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'Missing meta description',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'meta[name=description]', value: 'missing' }],
+      diagnosis: 'The page has no meta description, so search engines generate a snippet from body text. Expected CTR loss on branded queries.',
+      recommendedFix: 'Add a generated description:',
+      fixDetail: `Meta description summing up ${site.name || domain} services, value proposition and CTA (135–160 characters).`,
+      confidence: 91,
+      autoFixable: true,
+      seoImpact: 'Low',
+    });
+  }
+
+  if (!html.ogTitle || !html.ogDesc || !html.ogImage) {
+    f({
+      key: 'open_graph',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'Incomplete social sharing (Open Graph)',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'og:title', value: html.ogTitle ? 'present' : 'missing' }, { label: 'og:description', value: html.ogDesc ? 'present' : 'missing' }, { label: 'og:image', value: html.ogImage ? 'present' : 'missing' }],
+      diagnosis: 'Social networks may render a poor preview because Open Graph tags are incomplete.',
+      recommendedFix: 'Add the missing og: tags to the <head>.',
+      fixDetail: 'og:title, og:description and a 1200×630 og:image.',
+      confidence: 90,
+      autoFixable: true,
+      seoImpact: 'Low',
+    });
+  }
+
+  if (!html.viewport) {
+    f({
+      key: 'viewport',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'Missing viewport meta tag',
+      severity: 'critical',
+      impact: 'High',
+      evidence: [{ label: 'meta[name=viewport]', value: 'missing' }],
+      diagnosis: 'No viewport meta tag means the page renders in desktop width on mobile, breaking responsive layout and hurting mobile rankings.',
+      recommendedFix: 'Add the tag:',
+      fixDetail: '<meta name="viewport" content="width=device-width, initial-scale=1">',
+      confidence: 98,
+      autoFixable: true,
+      seoImpact: 'High',
+    });
+  }
+
+  if (html.h1s === 0) {
+    f({
+      key: 'no_h1',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'No H1 heading on the page',
+      severity: 'warning',
+      impact: 'Medium',
+      evidence: [{ label: 'H1 count', value: '0' }],
+      diagnosis: 'The page has no H1 heading, which weakens the semantic structure search engines rely on.',
+      recommendedFix: 'Add one H1 that matches the page topic.',
+      fixDetail: 'Insert a single descriptive <h1> near the top of the page.',
+      confidence: 88,
+      autoFixable: true,
+      seoImpact: 'Medium',
+    });
+  } else if (html.h1s > 1) {
+    f({
+      key: 'multiple_h1',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'Multiple H1 headings',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'H1 count', value: String(html.h1s) }],
+      diagnosis: `${html.h1s} H1 headings were found. A single H1 per page is the recommended practice.`,
+      recommendedFix: 'Convert the extra H1s to H2/H3.',
+      fixDetail: `${html.h1s} H1 → keep one, demote the rest.`,
+      confidence: 85,
+      autoFixable: true,
+      seoImpact: 'Low',
+    });
+  }
+
+  if (html.imgsNoAlt > 0 && html.imgsNoAlt >= Math.max(1, Math.floor(html.imgs * 0.2))) {
+    f({
+      key: 'images_alt',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'Images missing alt text',
+      severity: 'warning',
+      impact: 'Medium',
+      evidence: [{ label: 'Images without alt', value: `${html.imgsNoAlt} of ${html.imgs}` }],
+      diagnosis: `${html.imgsNoAlt} images are missing alt text, hurting accessibility and image SEO.`,
+      recommendedFix: 'Add descriptive alt attributes.',
+      fixDetail: `alt="..." on the ${html.imgsNoAlt} flagged images.`,
+      confidence: 84,
+      autoFixable: true,
+      seoImpact: 'Medium',
+    });
+  }
+
+  if (!html.favicon) {
+    f({
+      key: 'favicon',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'No favicon declared',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: '<link rel="icon">', value: 'missing' }],
+      diagnosis: 'No favicon is declared, producing a default icon in browser tabs and bookmarks.',
+      recommendedFix: 'Add a favicon link:',
+      fixDetail: '<link rel="icon" type="image/x-icon" href="/favicon.ico">',
+      confidence: 96,
+      autoFixable: true,
+    });
+  }
+
+  if (robots && robots.status === 404) {
+    f({
+      key: 'robots_missing',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'robots.txt not found',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'GET /robots.txt', value: '404' }],
+      diagnosis: 'robots.txt is missing. Default crawl behavior applies, but important directives (Disallow, Sitemap) cannot be communicated.',
+      recommendedFix: 'Create robots.txt at the site root.',
+      fixDetail: 'https://' + domain + '/robots.txt with User-agent: * and a Sitemap line.',
+      confidence: 88,
+      autoFixable: true,
+      seoImpact: 'Low',
+    });
+  }
+
+  if (sitemap && sitemap.status === 404) {
+    f({
+      key: 'sitemap_missing',
+      agent: 'SEO Agent',
+      category: 'SEO',
+      title: 'sitemap.xml not found',
+      severity: 'optimization',
+      impact: 'Low',
+      evidence: [{ label: 'GET /sitemap.xml', value: '404' }],
+      diagnosis: 'No XML sitemap was found, which can slow down discovery of new pages.',
+      recommendedFix: 'Generate a sitemap and reference it in robots.txt.',
+      fixDetail: 'Submit https://' + domain + '/sitemap.xml in Google Search Console.',
+      confidence: 86,
+      autoFixable: true,
+      seoImpact: 'Low',
+    });
+  }
+
+  if (html.formsNoAction > 0) {
+    f({
+      key: 'form_no_action',
+      agent: 'Form Agent',
+      category: 'Forms',
+      title: 'Forms without a submission target',
+      severity: 'warning',
+      impact: 'High',
+      evidence: [{ label: 'Forms without action', value: `${html.formsNoAction} of ${html.forms}` }],
+      diagnosis: `${html.formsNoAction} form(s) have no action attribute or handler, so submissions may be silently lost.`,
+      recommendedFix: 'Ensure every <form> posts to a valid endpoint.',
+      fixDetail: `Wire the ${html.formsNoAction} flagged form(s) to a working handler.`,
+      confidence: 82,
+      autoFixable: false,
+      seoImpact: 'None',
+    });
+  }
+
+  return findings;
+}
+
+function scoreFromFindings(findings) {
+  let score = 100;
+  for (const f of findings) {
+    if (f.severity === 'critical') score -= 22;
+    else if (f.severity === 'warning') score -= 8;
+    else score -= 3;
+  }
+  score = Math.max(0, Math.min(100, score));
+  const status = score >= 90 ? 'healthy' : score >= 70 ? 'warning' : 'critical';
+  return { score, status, critical: findings.filter((f) => f.severity === 'critical').length, warning: findings.filter((f) => f.severity === 'warning').length, optimization: findings.filter((f) => f.severity === 'optimization').length };
+}
+
+function extractJson(text) {
+  const a = String(text || '').indexOf('[');
+  const z = String(text || '').lastIndexOf(']');
+  if (a === -1 || z === -1) return null;
+  try {
+    return JSON.parse(text.slice(a, z + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function enrichFindingsWithAI(domain, findings) {
+  const prompt =
+    `You run automated website audits for SiteGuard AI. Here is the homepage analysis of ${domain}:\n` +
+    JSON.stringify(findings.map((f) => ({ key: f.key, title: f.title, severity: f.severity, category: f.category, evidence: f.evidence }))) +
+    '\nReturn ONLY a JSON array with one object per finding (same order): {"key": string, "diagnosis": string, "recommendedFix": string, "fixDetail": string, "confidence": number (0-100), "impact": "High"|"Medium"|"Low"}. No markdown, no extra text.';
+  const res = await callOpenRouter(prompt);
+  if (!res) return null;
+  const list = extractJson(res.output);
+  if (!Array.isArray(list)) return null;
+  const byKey = {};
+  for (const item of list) if (item && item.key) byKey[item.key] = item;
+  return byKey;
+}
+
+async function persistScan(workspace, website, findings, durationMs, domain) {
+  const { score, status, critical, warning, optimization } = scoreFromFindings(findings);
+  await sql`
+    INSERT INTO scans (website_id, workspace_id, status, pages_scanned, issues_found, duration_ms, completed_at, error)
+    VALUES (${website.id}, ${workspace.id}, 'completed', 1, ${findings.length}, ${durationMs}, NOW(), NULL)
+  `;
+  const keys = findings.filter((f) => f.key).map((f) => website.id + ':' + f.key);
+  for (const f of findings) {
+    const payload = { ...f, domain };
+    await sql`
+      INSERT INTO issues (website_id, workspace_id, title, description, category, severity, status, impact, suggestion, auto_fixable, detected_by, path, payload, fingerprint)
+      VALUES (${website.id}, ${workspace.id}, ${f.title}, ${f.diagnosis}, ${f.category}, ${dbSeverity(f.severity)}, 'open', ${f.impact}, ${f.recommendedFix}, ${Boolean(f.autoFixable)}, ${f.detectedBy}, ${f.path}, ${JSON.stringify(payload)}::JSONB, ${website.id + ':' + f.key})
+      ON CONFLICT (fingerprint) WHERE fingerprint IS NOT NULL
+      DO UPDATE SET updated_at=NOW(), detected_at=NOW(), status='open', payload=EXCLUDED.payload, severity=EXCLUDED.severity
+    `;
+  }
+  if (keys.length > 0) {
+    await sql`
+      UPDATE issues SET status='resolved', resolved_at=NOW(), updated_at=NOW(),
+        payload = COALESCE(payload, '{}'::JSONB) || '{"resolvedReason":"no longer detected on recent scan"}'::JSONB
+      WHERE website_id=${website.id} AND status IN ('open','in_progress') AND (fingerprint IS NOT NULL AND NOT (fingerprint = ANY(${keys})))
+    `;
+  } else {
+    await sql`
+      UPDATE issues SET status='resolved', resolved_at=NOW(), updated_at=NOW(),
+        payload = COALESCE(payload, '{}'::JSONB) || '{"resolvedReason":"no longer detected on recent scan"}'::JSONB
+      WHERE website_id=${website.id} AND status IN ('open','in_progress')
+    `;
+  }
+  const owner = await sql`SELECT owner_id FROM workspaces WHERE id=${workspace.id}`;
+  const ownerId = owner.rows[0]?.owner_id;
+  for (const f of findings.filter((x) => x.severity === 'critical' || x.severity === 'warning')) {
+    if (ownerId) {
+      const dup = await sql`
+        SELECT 1 FROM notifications WHERE user_id=${ownerId} AND title=${f.title} AND LOWER(body) LIKE ${'%' + domain.toLowerCase() + '%'} AND created_at > NOW() - INTERVAL '24 hours' LIMIT 1
+      `;
+      if (dup.rows.length === 0) {
+        await sql`
+          INSERT INTO notifications (user_id, workspace_id, title, body, type)
+          VALUES (${ownerId}, ${workspace.id}, ${f.title}, ${f.title + ' · ' + domain + ' · ' + f.path}, ${f.severity === 'critical' ? 'critical' : 'warning'})
+        `;
+      }
+    }
+  }
+  await sql`
+    UPDATE websites SET health_score=${score}, status=${status}, issues_count=${critical + warning + optimization}, response_ms=${durationMs}, last_scan_at=NOW(), updated_at=NOW()
+    WHERE id=${website.id}
+  `;
+  return { score, status, critical, warning, optimization };
+}
+
+async function runSmartScan(workspace, website) {
+  const domain = normalizeDomain(website.domain);
+  const page = await fetchPage(`https://${domain}`);
+  const [robots, sitemap] = await Promise.all([fetchAux(domain, '/robots.txt'), fetchAux(domain, '/sitemap.xml')]);
+  const html = analyzeHtml(page.body);
+  const sec = securityChecks(page.headers);
+  const sitemapCount = (sitemap.text.match(/<loc>/g) || []).length;
+  const metrics = { page, html, sec, robots: robots.status === 0 ? null : { ...robots, count: robots.text.includes('Disallow: /') ? -1 : 0 }, sitemap: sitemap.status === 0 ? null : { ...sitemap, count: sitemapCount }, domain, durationMs: page.durationMs };
+  let findings = buildFindings(website, metrics);
+  const enriched = await enrichFindingsWithAI(domain, findings);
+  if (enriched) {
+    findings = findings.map((f) => {
+      const e = enriched[f.key];
+      if (!e) return f;
+      return {
+        ...f,
+        diagnosis: e.diagnosis || f.diagnosis,
+        recommendedFix: e.recommendedFix || f.recommendedFix,
+        fixDetail: e.fixDetail || f.fixDetail,
+        confidence: typeof e.confidence === 'number' ? Math.max(0, Math.min(100, Math.round(e.confidence))) : f.confidence,
+        impact: e.impact || f.impact,
+      };
+    });
+  }
+  const result = await persistScan(workspace, website, findings, page.durationMs, domain);
+  return { domain, ...result, findings, provider: enriched ? 'ai' : 'heuristic' };
+}
+
+async function websitesList(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return OK(res, { websites: [] });
+    const rows = await sql`
+      SELECT w.*,
+        (SELECT count(*) FROM scans s WHERE s.website_id = w.id) AS scan_count,
+        (SELECT count(*) FROM scans s WHERE s.website_id = w.id AND s.status='completed' AND s.error IS NULL) AS scan_ok
+      FROM websites w WHERE w.workspace_id=${workspaceId} ORDER BY w.created_at ASC
+    `;
+    return OK(res, { websites: rows.rows });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur liste sites', 500);
+  }
+}
+
+async function websitesCreate(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { url, name, client } = req.body || {};
+    const domain = normalizeDomain(url);
+    if (!domain || !domain.includes('.') || domain.length < 4) return KO(res, 'URL de site invalide');
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+
+    const dup = await sql`SELECT id FROM websites WHERE workspace_id=${workspaceId} AND domain=${domain}`;
+    if (dup.rows.length > 0) {
+      const wid = dup.rows[0].id;
+      const site = await sql`SELECT * FROM websites WHERE id=${wid}`;
+      await sql`UPDATE websites SET status='scanning', updated_at=NOW() WHERE id=${wid}`;
+      const scan = await runSmartScan({ id: workspaceId, owner_id: user.id }, site.rows[0]);
+      const refreshed = await sql`SELECT * FROM websites WHERE id=${wid}`;
+      return OK(res, { website: refreshed.rows[0], scan, scanned: true }, 201);
+    }
+
+    const plan = await sql`
+      SELECT pl.code FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id
+      WHERE s.user_id=${user.id} AND s.status='active' ORDER BY s.created_at DESC LIMIT 1
+    `;
+    const planName = plan.rows[0]?.code ? plan.rows[0].code[0].toUpperCase() + plan.rows[0].code.slice(1) : 'Starter';
+    const insert = await sql`
+      INSERT INTO websites (workspace_id, domain, name, client, status, health_score, plan, connected_at, response_ms, uptime)
+      VALUES (${workspaceId}, ${domain}, ${name || domain}, ${client || ''}, 'scanning', 0, ${planName}, NOW(), 0, '—')
+      RETURNING *
+    `;
+    const website = insert.rows[0];
+    try {
+      const scan = await runSmartScan({ id: workspaceId, owner_id: user.id }, website);
+      const refreshed = await sql`SELECT * FROM websites WHERE id=${website.id}`;
+      return OK(res, { website: refreshed.rows[0], scan }, 201);
+    } catch (scanErr) {
+      await sql`UPDATE websites SET status='error', updated_at=NOW() WHERE id=${website.id}`;
+      return OK(res, { website: { ...website, status: 'error' }, scanError: String(scanErr?.message || scanErr) }, 201);
+    }
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur creation site', 500);
+  }
+}
+
+async function websitesScan(req, res, direct) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  const websiteId = req.body?.websiteId || direct?.websiteId;
+  try {
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+    const site = await sql`SELECT * FROM websites WHERE id=${websiteId} AND workspace_id=${workspaceId}`;
+    if (site.rows.length === 0) return KO(res, 'Site introuvable', 404);
+    await sql`UPDATE websites SET status='scanning', updated_at=NOW() WHERE id=${websiteId}`;
+    const scan = await runSmartScan({ id: workspaceId, owner_id: user.id }, site.rows[0]);
+    const refreshed = await sql`SELECT * FROM websites WHERE id=${websiteId}`;
+    return OK(res, { website: refreshed.rows[0], scan });
+  } catch (e) {
+    await sql`UPDATE websites SET status='error', updated_at=NOW() WHERE id=${websiteId}`;
+    return KO(res, e?.message || 'Erreur scan', 500);
+  }
+}
+
+async function websitesDelete(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { websiteId } = req.body || {};
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+    await sql`DELETE FROM websites WHERE id=${websiteId} AND workspace_id=${workspaceId}`;
+    return OK(res, { deleted: true });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur suppression', 500);
+  }
+}
+
+async function issuesList(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return OK(res, { issues: [] });
+    const { site, status, severity } = req.query || {};
+    let rows;
+    if (site) {
+      rows = await sql`SELECT * FROM issues WHERE workspace_id=${workspaceId} AND website_id=${site} ORDER BY detected_at DESC LIMIT 200`;
+    } else {
+      rows = await sql`SELECT * FROM issues WHERE workspace_id=${workspaceId} ORDER BY detected_at DESC LIMIT 200`;
+    }
+    let out = rows.rows;
+    if (status) out = out.filter((r) => r.status === status);
+    if (severity) out = out.filter((r) => r.severity === severity);
+    return OK(res, { issues: out });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur liste issues', 500);
+  }
+}
+
+async function issuesUpdate(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { issueId, status } = req.body || {};
+    if (!issueId || !status) return KO(res, 'issueId et status requis');
+    const allowed = { open: 'open', approval: 'in_progress', in_progress: 'in_progress', resolved: 'resolved', ignored: 'ignored', closed: 'resolved' };
+    const dbStatus = allowed[status];
+    if (!dbStatus) return KO(res, 'Statut invalide');
+    const workspaceId = await firstWorkspace(user.id);
+    let r;
+    if (dbStatus === 'resolved') {
+      r = await sql`
+        UPDATE issues SET status=${dbStatus}, updated_at=NOW(), resolved_at=NOW()
+        WHERE id=${issueId} AND workspace_id=${workspaceId} RETURNING *
+      `;
+    } else {
+      r = await sql`
+        UPDATE issues SET status=${dbStatus}, updated_at=NOW(), resolved_at=NULL
+        WHERE id=${issueId} AND workspace_id=${workspaceId} RETURNING *
+      `;
+    }
+    if (r.rows.length === 0) return KO(res, 'Issue introuvable', 404);
+    return OK(res, { issue: r.rows[0] });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur mise a jour issue', 500);
+  }
+}
+
+async function notificationsList(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const rows = await sql`SELECT * FROM notifications WHERE user_id=${user.id} ORDER BY created_at DESC LIMIT 100`;
+    return OK(res, { notifications: rows.rows });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur notifications', 500);
+  }
+}
+
+async function notificationsRead(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { id } = req.body || {};
+    if (id) await sql`UPDATE notifications SET read_at=NOW() WHERE id=${id} AND user_id=${user.id}`;
+    else await sql`UPDATE notifications SET read_at=NOW() WHERE user_id=${user.id} AND read_at IS NULL`;
+    return OK(res, { read: true });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur lecture notifications', 500);
+  }
+}
+
+async function dashboardOverview(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return OK(res, {
+      websites: 0, healthy: 0, issues: 0, approvals: 0, healthScore: 0, trend: '—',
+      metrics: [
+        { label: 'Availability', value: '—', percent: 0, tone: 'neutral', hint: '-' },
+        { label: 'Performance', value: '—', percent: 0, tone: 'neutral', hint: '-' },
+        { label: 'Security', value: '—', percent: 0, tone: 'neutral', hint: '-' },
+        { label: 'SEO', value: '—', percent: 0, tone: 'neutral', hint: '-' },
+        { label: 'Forms', value: '—', percent: 0, tone: 'neutral', hint: '-' },
+      ],
+    });
+
+    const [sites, openIssues, approvals, scans] = await Promise.all([
+      sql`SELECT status, health_score FROM websites WHERE workspace_id=${workspaceId}`,
+      sql`SELECT severity, category FROM issues WHERE workspace_id=${workspaceId} AND status IN ('open','in_progress')`,
+      sql`SELECT count(*)::int AS n FROM issues WHERE workspace_id=${workspaceId} AND status='in_progress'`,
+      sql`SELECT status, error FROM scans WHERE workspace_id=${workspaceId}`,
+    ]);
+
+    const total = sites.rows.length;
+    const healthy = sites.rows.filter((s) => s.status === 'healthy').length;
+    const avgHealth = total ? Math.round(sites.rows.reduce((a, s) => a + (s.health_score || 0), 0) / total) : 0;
+    const open = openIssues.rows;
+    const counts = { critical: open.filter((i) => i.severity === 'critical').length, warning: open.filter((i) => i.severity === 'high' || i.severity === 'medium').length, optimization: open.filter((i) => i.severity === 'low').length };
+    const byCategory = (cat) => open.filter((i) => i.category === cat).length;
+
+    const availRows = scans.rows;
+    const availPct = availRows.length ? Math.round(100 * availRows.filter((s) => s.status === 'completed' && !s.error).length / availRows.length) : 100;
+
+    const clamp = (n) => Math.max(0, Math.min(100, Math.round(n)));
+    return OK(res, {
+      websites: total,
+      healthy,
+      issues: open.length,
+      approvals: approvals.rows[0]?.n || 0,
+      healthScore: avgHealth,
+      trend: `${healthy}/${total} healthy`,
+      metrics: [
+        { label: 'Availability', value: `${availPct.toFixed(2)}%`.replace('.00', ''), percent: availPct, tone: availPct >= 99 ? 'healthy' : availPct >= 95 ? 'warning' : 'critical', hint: 'scan success rate' },
+        { label: 'Performance', value: 'n/a', percent: 0, tone: 'neutral', hint: 'connect a site' },
+        { label: 'Security', value: `${clamp(100 - counts.critical * 25 - counts.warning * 10)}/100`, percent: clamp(100 - counts.critical * 25 - counts.warning * 10), tone: counts.critical > 0 ? 'critical' : counts.warning > 0 ? 'warning' : 'healthy', hint: byCategory('Security') ? `${byCategory('Security')} open security issues` : 'no open security issues' },
+        { label: 'SEO', value: `${clamp(100 - counts.optimization * 6)}/100`, percent: clamp(100 - counts.optimization * 6), tone: counts.optimization > 4 ? 'warning' : 'healthy', hint: byCategory('SEO') ? `${byCategory('SEO')} open SEO issues` : 'no open SEO issues' },
+        { label: 'Forms', value: `${clamp(100 - counts.warning * 12)}/100`, percent: clamp(100 - counts.warning * 12), tone: byCategory('Forms') ? 'warning' : 'healthy', hint: byCategory('Forms') ? `${byCategory('Forms')} open form issues` : 'all forms healthy' },
+      ],
+    });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur dashboard', 500);
+  }
+}
+
+async function activityList(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return OK(res, { activity: [] });
+    const [scans, issues, payments] = await Promise.all([
+      sql`SELECT s.*, w.domain FROM scans s JOIN websites w ON w.id = s.website_id WHERE s.workspace_id=${workspaceId} ORDER BY s.created_at DESC LIMIT 40`,
+      sql`SELECT i.*, w.domain FROM issues i JOIN websites w ON w.id = i.website_id WHERE i.workspace_id=${workspaceId} AND i.status='open' ORDER BY i.detected_at DESC LIMIT 30`,
+      sql`SELECT p.* FROM payments p WHERE p.workspace_id=${workspaceId} AND p.status='success' ORDER BY p.paid_at DESC LIMIT 20`,
+    ]);
+    const events = [];
+    for (const s of scans.rows) {
+      events.push({
+        id: `scan-${s.id}`,
+        time: s.created_at,
+        agent: 'Monitor Agent',
+        message: `Scanned ${s.domain} · ${s.issues_found} issue(s) in ${s.duration_ms} ms`,
+        kind: s.issues_found > 0 ? 'detect' : 'verify',
+        site: s.domain,
+      });
+    }
+    for (const i of issues.rows) {
+      events.push({
+        id: `issue-${i.id}`,
+        time: i.detected_at,
+        agent: i.detected_by || 'AI diagnosis',
+        message: `${i.title} · ${i.domain}${i.path && i.path !== '/' ? ' ' + i.path : ''}`,
+        kind: 'detect',
+        site: i.domain,
+      });
+    }
+    for (const p of payments.rows) {
+      events.push({
+        id: `pay-${p.id}`,
+        time: p.paid_at,
+        agent: 'Billing',
+        message: `Payment received · ${(p.amount_cfa / 1000).toFixed(0)}k FCFA (${p.plan_code})`,
+        kind: 'verify',
+      });
+    }
+    events.sort((a, b) => new Date(b.time) - new Date(a.time));
+    return OK(res, { activity: events.slice(0, 50) });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur activite', 500);
+  }
+}
+
+async function billingSummary(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const workspaceId = await firstWorkspace(user.id);
+    const sub = await sql`
+      SELECT s.status, s.current_period_end, s.cancel_at_period_end, s.provider, p.code, p.name, p.price_cfa, p.features, p.limits
+      FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+      WHERE s.user_id=${user.id} ORDER BY s.created_at DESC LIMIT 1
+    `;
+    const payments = await sql`SELECT * FROM payments WHERE user_id=${user.id} ORDER BY created_at DESC LIMIT 50`;
+    const sites = await sql`SELECT count(*)::int AS n FROM websites WHERE workspace_id=${workspaceId}`;
+    const scans = await sql`SELECT count(*)::int AS n FROM scans WHERE workspace_id=${workspaceId} AND created_at > date_trunc('month', NOW())`;
+    const openIssues = await sql`SELECT count(*)::int AS n FROM issues WHERE workspace_id=${workspaceId} AND status IN ('open','in_progress')`;
+    const resolved = await sql`SELECT count(*)::int AS n FROM issues WHERE workspace_id=${workspaceId} AND status='resolved'`;
+    const s = sub.rows[0];
+    return OK(res, {
+      subscription: s ? { status: s.status, planCode: s.code, planName: s.name, priceCfa: s.price_cfa, periodEnd: s.current_period_end, cancelAtPeriodEnd: s.cancel_at_period_end, provider: s.provider } : null,
+      payments: payments.rows,
+      usage: {
+        websites: sites.rows[0]?.n || 0,
+        websitesMax: s?.limits?.websites ?? 0,
+        scans: scans.rows[0]?.n || 0,
+        openIssues: openIssues.rows[0]?.n || 0,
+        resolved: resolved.rows[0]?.n || 0,
+      },
+    });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur billing', 500);
+  }
+}
+
+async function automationsList(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return OK(res, { automations: [] });
+    const rows = await sql`SELECT * FROM automations WHERE workspace_id=${workspaceId} ORDER BY created_at ASC`;
+    return OK(res, { automations: rows.rows });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur automations', 500);
+  }
+}
+
+async function automationsUpdate(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { id, enabled } = req.body || {};
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+    const r = await sql`UPDATE automations SET enabled=${Boolean(enabled)}, updated_at=NOW() WHERE id=${id} AND workspace_id=${workspaceId} RETURNING *`;
+    if (r.rows.length === 0) return KO(res, 'Automation introuvable', 404);
+    return OK(res, { automation: r.rows[0] });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur automation', 500);
+  }
+}
+
 const ROUTES = {
   'auth/register': register,
   'auth/login': login,
@@ -691,6 +1777,19 @@ const ROUTES = {
   'db/migrate': dbMigrate,
   'db/status': dbStatus,
   'db/test': dbTest,
+  'websites/list': websitesList,
+  'websites/create': websitesCreate,
+  'websites/scan': websitesScan,
+  'websites/delete': websitesDelete,
+  'issues/list': issuesList,
+  'issues/update': issuesUpdate,
+  'notifications/list': notificationsList,
+  'notifications/read': notificationsRead,
+  'dashboard/overview': dashboardOverview,
+  'dashboard/activity': activityList,
+  'billing/summary': billingSummary,
+  'automations/list': automationsList,
+  'automations/update': automationsUpdate,
 };
 
 export default async function handler(req, res) {

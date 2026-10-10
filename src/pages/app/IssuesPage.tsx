@@ -8,7 +8,7 @@ import { Input } from '../../components/ui/Input'
 import { Panel } from '../../components/ui/Panel'
 import { StatusPill } from '../../components/ui/Status'
 import { EmptyState } from '../../components/ui/Table'
-import { issues as allIssues, websites } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
 
 type View = 'open' | 'approval' | 'resolved' | 'all'
 
@@ -20,6 +20,7 @@ const views: { id: View; label: string }[] = [
 ]
 
 export default function IssuesPage() {
+  const { issues: allIssues, websites } = useRealtime()
   const [view, setView] = useState<View>('all')
   const [query, setQuery] = useState('')
 
@@ -35,7 +36,7 @@ export default function IssuesPage() {
         (site?.domain ?? '').toLowerCase().includes(q)
       return matchesView && matchesQuery
     })
-  }, [view, query])
+  }, [view, query, allIssues, websites])
 
   const counts = {
     approval: allIssues.filter((i) => i.status === 'approval').length,

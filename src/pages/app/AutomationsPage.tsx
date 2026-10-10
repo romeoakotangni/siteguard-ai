@@ -4,71 +4,37 @@ import { Button } from '../../components/ui/Button'
 import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { StatusPill } from '../../components/ui/Status'
 import { Toggle } from '../../components/ui/Tabs'
-import { useState } from 'react'
+import { useRealtime } from '../../lib/realtime'
 
-interface Automation {
-  id: string
-  name: string
-  trigger: string
-  action: string
-  scope: string
-  enabled: boolean
-  runs: number
+const triggerLabel: Record<string, string> = {
+  monitor_404: 'Monitor Agent detects an internal 404',
+  deploy_webhook: 'Deployment webhook received',
+  performance_lcp: 'Performance Agent detects an LCP regression from an image',
+  weekly: 'Every Monday, 08:00',
 }
 
-const initial: Automation[] = [
-  {
-    id: 'auto-404',
-    name: 'Fix broken internal links',
-    trigger: 'Monitor Agent detects an internal 404',
-    action: 'Update link target to the replacement URL, then verify',
-    scope: 'All websites',
-    enabled: true,
-    runs: 42,
-  },
-  {
-    id: 'auto-meta',
-    name: 'Add missing meta descriptions',
-    trigger: 'SEO Agent finds a page without description',
-    action: 'Insert generated description, queue for review',
-    scope: 'All websites',
-    enabled: true,
-    runs: 27,
-  },
-  {
-    id: 'auto-image',
-    name: 'Optimize oversized images',
-    trigger: 'Performance Agent detects LCP regression from an image',
-    action: 'Convert to WebP with responsive srcset',
-    scope: 'Pro and Agency sites',
-    enabled: false,
-    runs: 9,
-  },
-  {
-    id: 'auto-deploy',
-    name: 'Verify after every deploy',
-    trigger: 'Deployment webhook received',
-    action: 'Run full scan, compare snapshots, open issues on regression',
-    scope: 'All websites',
-    enabled: true,
-    runs: 118,
-  },
-  {
-    id: 'auto-report',
-    name: 'Weekly client report',
-    trigger: 'Every Monday, 08:00',
-    action: 'Generate and email a white-label health report',
-    scope: 'Client reports',
-    enabled: true,
-    runs: 14,
-  },
-]
+const actionLabel: Record<string, string> = {
+  update_link: 'Update link target to the replacement URL, then verify',
+  full_scan: 'Run full scan, compare snapshots, open issues on regression',
+  webp: 'Convert to WebP with responsive srcset',
+  report_email: 'Generate and email a white-label health report',
+}
 
 export default function AutomationsPage() {
-  const [rules, setRules] = useState(initial)
+  const { automations, toggleAutomation } = useRealtime()
+
+  const rules = automations.map((r: any) => ({
+    id: r.id,
+    name: r.name,
+    trigger: triggerLabel[r.trigger] || r.trigger || '',
+    action: actionLabel[r.action?.kind] || r.action?.kind || '',
+    scope: String(r.name).includes('image') ? 'Pro and Agency sites' : 'All websites',
+    enabled: Boolean(r.enabled),
+    runs: 0,
+  }))
 
   const toggle = (id: string, value: boolean) =>
-    setRules((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: value } : r)))
+    toggleAutomation(id, value).catch(() => {})
 
   return (
     <>

@@ -1,30 +1,46 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import { BottomNav, MobileNav, Topbar } from './Topbar'
 import { Sidebar } from './Sidebar'
 import { ScrollProgress } from '../motion/ScrollProgress'
+import { useRealtime } from '../../lib/realtime'
+
+function LiveRefresh() {
+  const { refresh } = useRealtime()
+  const { pathname } = useLocation()
+
+  useEffect(() => {
+    const t = setTimeout(() => refresh().catch(() => {}), 120)
+    return () => clearTimeout(t)
+  }, [pathname, refresh])
+
+  return null
+}
 
 export default function AppLayout() {
   const [mobileNav, setMobileNav] = useState(false)
   const location = useLocation()
 
   return (
-    <div className="flex min-h-screen bg-canvas">
-      <ScrollProgress />
-      <Sidebar />
-      <MobileNav open={mobileNav} onClose={() => setMobileNav(false)} />
+    <>
+      <LiveRefresh />
+      <div className="flex min-h-screen bg-canvas">
+        <ScrollProgress />
+        <Sidebar />
+        <MobileNav open={mobileNav} onClose={() => setMobileNav(false)} />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar onOpenMobileNav={() => setMobileNav(true)} />
-        <main
-          key={location.pathname}
-          className="mx-auto w-full max-w-7xl flex-1 px-4 pt-6 pb-24 md:px-6 lg:pb-12 animate-fade-up"
-        >
-          <Outlet />
-        </main>
-        <BottomNav />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Topbar onOpenMobileNav={() => setMobileNav(true)} />
+          <main
+            key={location.pathname}
+            className="mx-auto w-full max-w-7xl flex-1 px-4 pt-6 pb-24 md:px-6 lg:pb-12 animate-fade-up"
+          >
+            <Outlet />
+          </main>
+          <BottomNav />
+        </div>
       </div>
-    </div>
+    </>
   )
 }
 

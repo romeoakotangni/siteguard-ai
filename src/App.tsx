@@ -1,5 +1,6 @@
 import { Route, Routes, useLocation } from 'react-router-dom'
 import { useEffect } from 'react'
+import { RealtimeProvider } from './lib/realtime'
 import LandingPage from './pages/LandingPage'
 import OnboardingPage from './pages/OnboardingPage'
 import LoginPage from './pages/LoginPage'
@@ -24,7 +25,7 @@ function ScrollToTop() {
 
 export default function App() {
   return (
-    <>
+    <RealtimeProvider>
       <ScrollToTop />
       <Routes>
         <Route path="/" element={<LandingPage />} />
@@ -45,9 +46,9 @@ export default function App() {
           <Route path="settings" element={<SettingsPage />} />
           <Route path="billing" element={<BillingPage />} />
         </Route>
-        <Route path="*" element={<LandingPage />} />
+<Route path="*" element={<LandingPage />} />
       </Routes>
-    </>
+    </RealtimeProvider>
   )
 }
 

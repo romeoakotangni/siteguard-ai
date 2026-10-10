@@ -1,12 +1,21 @@
 import { Bell, Bot, Check, Globe, LayoutDashboard, Menu, Search, ShieldAlert, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link, NavLink } from 'react-router-dom'
-import { notifications, workspace } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
 import { cn } from '../../lib/utils'
 import { Logo } from '../Logo'
 import { StatusDot } from '../ui/Status'
 
+const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0].toUpperCase())
+    .join('') || 'WS'
+
 export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
+  const { notifications, workspace } = useRealtime()
   const [notifOpen, setNotifOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const unread = notifications.filter((n) => !n.read).length
@@ -97,7 +106,7 @@ export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
 
         <div className="hidden items-center gap-2 rounded-md border border-line px-2 py-1 sm:flex">
           <span className="flex size-5 items-center justify-center rounded bg-ink text-[9px] font-bold text-white">
-            NA
+            {initials(workspace.name)}
           </span>
           <span className="text-[13px] font-medium text-ink">{workspace.name}</span>
         </div>
@@ -107,7 +116,7 @@ export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
           className="flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors hover:bg-surface-muted"
         >
           <span className="flex size-7 items-center justify-center rounded-full bg-accent-tint text-[11px] font-semibold text-accent-hover">
-            MD
+            {initials(workspace.user.name || workspace.name)}
           </span>
         </Link>
       </div>

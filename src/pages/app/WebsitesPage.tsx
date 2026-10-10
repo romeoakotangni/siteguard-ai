@@ -8,7 +8,7 @@ import { Input } from '../../components/ui/Input'
 import { Panel } from '../../components/ui/Panel'
 import { StatusPill } from '../../components/ui/Status'
 import { EmptyState, Table, Td, Th, Tr } from '../../components/ui/Table'
-import { websites, type SiteStatus } from '../../data/mock'
+import { useRealtime, type SiteStatus } from '../../lib/realtime'
 import { formatRelativeTime } from '../../lib/utils'
 
 type Filter = 'all' | SiteStatus
@@ -21,6 +21,7 @@ const filters: { id: Filter; label: string }[] = [
 ]
 
 export default function WebsitesPage() {
+  const { websites, agents } = useRealtime()
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
   const navigate = useNavigate()
@@ -33,13 +34,13 @@ export default function WebsitesPage() {
         !q || site.domain.toLowerCase().includes(q) || site.client.toLowerCase().includes(q)
       return matchesFilter && matchesQuery
     })
-  }, [filter, query])
+  }, [filter, query, websites])
 
   return (
     <>
       <PageHeader
         title="Websites"
-        subtitle={`${websites.length} sites connected · monitored by 6 AI agents`}
+        subtitle={`${websites.length} sites connected · monitored by ${agents.length} AI agents`}
         actions={
           <Link to="/onboarding">
             <Button>

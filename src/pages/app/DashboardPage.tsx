@@ -10,18 +10,23 @@ import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { StatusDot, StatusPill } from '../../components/ui/Status'
 import { ScoreChip } from '../../components/ui/HealthGauge'
 import { Table, Td, Th, Tr, EmptyState } from '../../components/ui/Table'
-import { approvals, activity, issues, overview, websites } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
 import { formatRelativeTime } from '../../lib/utils'
-
-const stats = [
-  { label: 'Websites', value: overview.websites, tone: 'neutral' as const },
-  { label: 'Healthy', value: overview.healthy, tone: 'healthy' as const },
-  { label: 'Issues', value: overview.issues, tone: 'warning' as const },
-  { label: 'Actions waiting for approval', value: overview.approvals, tone: 'info' as const },
-]
 
 export default function DashboardPage() {
   const navigate = useNavigate()
+  const { overview, websites, issues, approvals, activity, agents, scanWebsite, refreshing } = useRealtime()
+
+  const stats = [
+    { label: 'Websites', value: overview.websites, tone: 'neutral' as const },
+    { label: 'Healthy', value: overview.healthy, tone: 'healthy' as const },
+    { label: 'Issues', value: overview.issues, tone: 'warning' as const },
+    { label: 'Actions waiting for approval', value: overview.approvals, tone: 'info' as const },
+  ]
+
+  const scanAll = () => {
+    for (const w of websites) scanWebsite(w.id).catch(() => {})
+  }
 
   if (overview.websites === 0) {
     return <EmptyDashboard />
@@ -30,10 +35,12 @@ export default function DashboardPage() {
     <>
       <PageHeader
         title="Dashboard"
-        subtitle="Last updated 2 minutes ago · 6 agents active"
+        subtitle={`${agents.length} agents active · ${overview.healthScore}/100 global health`}
         actions={
           <>
-            <Button variant="secondary">Run scan</Button>
+            <Button variant="secondary" onClick={scanAll} disabled={refreshing}>
+              {refreshing ? 'Scanning…' : 'Run scan'}
+            </Button>
             <Link
               to="/onboarding"
               className="inline-flex h-9.5 items-center gap-2 rounded-md bg-accent px-4 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
@@ -158,9 +165,9 @@ export default function DashboardPage() {
 
       {/* Websites table */}
       <Panel className="mt-5">
-        <PanelHeader
+<PanelHeader
           title="Your websites"
-          subtitle={`${overview.websites} sites monitored · 22 healthy`}
+          subtitle={`${overview.websites} sites monitored · ${overview.healthy} healthy`}
           action={
             <Link
               to="/app/websites"
@@ -213,10 +220,10 @@ export default function DashboardPage() {
                   </Td>
                   <Td className="text-ink-muted tabular-nums">{site.responseMs} ms</Td>
                   <Td className="text-ink-muted">{formatRelativeTime(site.lastScan)}</Td>
-                  <Td className="text-right">
+<Td className="text-right">
                     <span className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
                       <Sparkles className="size-3.5 text-accent" />
-                      {agentsActive(site.id)}
+                      {agents.length} active
                     </span>
                   </Td>
                 </Tr>
@@ -257,20 +264,6 @@ export default function DashboardPage() {
       )}
     </>
   )
-}
-
-function agentsActive(siteId: string) {
-  const counts: Record<string, number> = {
-    'acme-studio': 6,
-    'nordic-fit': 4,
-    luminex: 5,
-    harborlegal: 6,
-    'verde-coffee': 3,
-    'atlas-consulting': 4,
-    'meridian-health': 5,
-    'pulse-labs': 4,
-  }
-  return `${counts[siteId] ?? 4} active`
 }
 
 /** Shown before the first site is connected — the primary CTA must be obvious. */

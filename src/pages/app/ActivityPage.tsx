@@ -3,11 +3,16 @@ import { ActivityFeed, TimelineLegend } from '../../components/Timeline'
 import { Button } from '../../components/ui/Button'
 import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { Tabs } from '../../components/ui/Tabs'
-import { activity } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
 import { useState } from 'react'
 
 export default function ActivityPage() {
+  const { activity, websites, scanWebsite, refreshing } = useRealtime()
   const [range, setRange] = useState('24h')
+
+  const scanAll = () => {
+    for (const w of websites) scanWebsite(w.id).catch(() => {})
+  }
 
   return (
     <>
@@ -17,7 +22,7 @@ export default function ActivityPage() {
         actions={
           <>
             <Button variant="secondary">Export CSV</Button>
-            <Button>Run scan</Button>
+            <Button onClick={scanAll} disabled={refreshing}>{refreshing ? 'Scanning…' : 'Run scan'}</Button>
           </>
         }
       />

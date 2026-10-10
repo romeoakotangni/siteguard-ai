@@ -7,30 +7,28 @@ import { Button } from '../components/ui/Button'
 import { HealthGauge } from '../components/ui/HealthGauge'
 import { Field, Input } from '../components/ui/Input'
 import { Panel, PanelBody, PanelHeader } from '../components/ui/Panel'
-import { issues } from '../data/mock'
+import { useAuth } from '../lib/auth'
+import { useRealtime } from '../lib/realtime'
 
-const scanSteps = [
-  { label: 'Checking availability', result: 'Up · 143 ms' },
-  { label: 'Checking performance', result: 'LCP 2.1s · INP 120ms' },
-  { label: 'Checking SEO', result: '47 pages crawled' },
-  { label: 'Testing forms', result: '3 forms passed' },
-  { label: 'Analyzing errors', result: '5 issues found' },
-  { label: 'Verifying security headers', result: '4 of 5 present' },
-]
-
-const logs = [
-  '10:44:02 · crawler — 47 pages indexed',
-  '10:44:06 · monitor-agent — TLS valid, expires in 74 days',
-  '10:44:09 · seo-agent — sitemap.xml · 63 URLs',
-  '10:44:12 · form-agent — /contact → 200 OK',
-  '10:44:15 · performance-agent — LCP 2.1s on 4G profile',
+const stepLabels = [
+  'Checking availability',
+  'Computing health score',
+  'Checking SEO',
+  'Testing forms',
+  'Analyzing errors',
+  'Verifying security headers',
 ]
 
 export default function OnboardingPage() {
   const [step, setStep] = useState<1 | 2 | 3>(1)
-  const [url, setUrl] = useState('https://example.com')
+  const [url, setUrl] = useState('')
   const [progress, setProgress] = useState(0)
   const [activeStep, setActiveStep] = useState(step)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [result, setResult] = useState<any>(null)
+  const { user } = useAuth()
+  const { connectWebsite, issues } = useRealtime()
   const navigate = useNavigate()
 
   if (activeStep !== step) {
@@ -40,20 +38,74 @@ export default function OnboardingPage() {
 
   useEffect(() => {
     if (step !== 2) return
-    const started = Date.now()
-    const total = 6500
-    const timer = setInterval(() => {
-      const pct = Math.min(100, ((Date.now() - started) / total) * 100)
-      setProgress(pct)
-      if (pct >= 100) {
-        clearInterval(timer)
-        setStep(3)
+    if (!pending) {
+      if (result) {
+        setProgress(100)
+        const t = setTimeout(() => setStep(3), 350)
+        return () => clearTimeout(t)
       }
+      if (error) {
+        const t = setTimeout(() => setStep(1), 2200)
+        return () => clearTimeout(t)
+      }
+      return
+    }
+    const started = Date.now()
+    const timer = setInterval(() => {
+      setProgress(Math.min(94, ((Date.now() - started) / 6500) * 94))
     }, 60)
     return () => clearInterval(timer)
-  }, [step])
+  }, [step, pending, result, error])
+
+  function start() {
+    if (!user) {
+      navigate('/register')
+      return
+    }
+    if (!url.trim()) return
+    setError('')
+    setResult(null)
+    setProgress(0)
+    setStep(2)
+    setPending(true)
+    const unwrap = (r: any) => (r?.data && typeof r.data === 'object' ? r.data : r)
+    connectWebsite({ url })
+      .then((r: any) => {
+        const body = unwrap(r)
+        if (body?.scanError) {
+          setError(body.scanError)
+          return
+        }
+        setResult(body)
+      })
+      .catch((e: any) => setError(e?.message || 'Le scan a échoué'))
+      .finally(() => setPending(false))
+  }
+
+  const payload = result?.data || result
+  const site = payload?.website
+  const scan = payload?.scan
+  const findings = scan?.findings || []
+  const countBy = (cat: string) => findings.filter((f: any) => f.category === cat).length
+
+  const scanSteps = site
+    ? [
+        { label: 'Checking availability', result: `Up · ${site.response_ms || 0} ms` },
+        { label: 'Computing health score', result: `${site.health_score}/100` },
+        { label: 'Checking SEO', result: `${countBy('SEO')} SEO findings` },
+        { label: 'Testing forms', result: countBy('Forms') ? `${countBy('Forms')} forms findings` : 'No form issues' },
+        { label: 'Analyzing errors', result: `${findings.length} issues found` },
+        { label: 'Verifying security headers', result: `${countBy('Security')} security findings` },
+      ]
+    : stepLabels.map((label) => ({ label, result: '' }))
 
   const doneCount = Math.min(scanSteps.length, Math.floor((progress / 100) * scanSteps.length))
+
+  const logs = site
+    ? findings.slice(0, 4).map((f: any) => `${f.detectedBy} — ${f.title} · ${f.path}`)
+    : ['scan en cours — attente du serveur…']
+
+  const siteIssues = site ? issues.filter((i) => i.siteId === site.id) : []
 
   return (
     <div className="min-h-screen bg-canvas">
@@ -90,8 +142,8 @@ export default function OnboardingPage() {
               Connect your first website
             </h1>
             <p className="mt-2 text-sm leading-relaxed text-ink-muted">
-              Paste the URL of a site you manage. AI agents start watching it immediately —
-              availability, errors, performance, SEO and forms.
+              Paste the URL of a site you manage. AI agents start watching it immediately — availability,
+              errors, performance, SEO and security.
             </p>
 
             <Panel className="mt-6">
@@ -105,12 +157,17 @@ export default function OnboardingPage() {
                     autoFocus
                   />
                 </Field>
+                {error && (
+                  <p className="rounded-md border border-critical/25 bg-critical-tint px-3 py-2 text-[13px] text-critical">
+                    {error}
+                  </p>
+                )}
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <span className="inline-flex items-center gap-2 text-[13px] text-ink-muted">
                     <span className="size-1.5 rounded-full bg-healthy" />
                     Monitoring starts as soon as the scan completes
                   </span>
-                  <Button onClick={() => setStep(2)} disabled={!url.trim()} size="lg">
+                  <Button onClick={start} disabled={!url.trim()} size="lg">
                     Start monitoring
                     <ArrowRight className="size-4" />
                   </Button>
@@ -125,10 +182,11 @@ export default function OnboardingPage() {
               </Link>
               <button
                 type="button"
-                onClick={() => setStep(2)}
-                className="font-medium text-accent hover:underline"
+                onClick={start}
+                disabled={!url.trim()}
+                className="font-medium text-accent hover:underline disabled:opacity-50"
               >
-                Voir une démo
+                Lancer le scan réel
               </button>
             </div>
           </div>
@@ -140,7 +198,7 @@ export default function OnboardingPage() {
               Step 2 · Initial scan
             </p>
             <h1 className="mt-2 text-2xl font-semibold tracking-[-0.02em] text-ink">
-              Scanning {url.replace(/^https?:\/\//, '')}
+              Scanning {url.replace(/^https?:\/\//, '').replace(/\/$/, '')}
             </h1>
             <p className="mt-2 text-sm text-ink-muted">
               Your first full analysis usually takes under 2 minutes.
@@ -200,8 +258,18 @@ export default function OnboardingPage() {
                 </ul>
 
                 <div className="rounded-md border border-line bg-canvas p-3 font-mono text-xs text-ink-muted">
-                  {logs[Math.min(logs.length - 1, Math.floor(progress / 20))]}
+                  <div className="max-h-24 space-y-1 overflow-hidden">
+                    {logs.map((l: string) => (
+                      <p key={l}>{l}</p>
+                    ))}
+                  </div>
                 </div>
+
+                {error && (
+                  <p className="rounded-md border border-critical/25 bg-critical-tint px-3 py-2 text-[13px] text-critical">
+                    {error}
+                  </p>
+                )}
               </PanelBody>
             </Panel>
 
@@ -209,20 +277,23 @@ export default function OnboardingPage() {
               <button
                 type="button"
                 onClick={() => setStep(1)}
-                className="inline-flex items-center gap-1.5 text-[13px] text-ink-muted hover:text-ink"
+                disabled={pending}
+                className="inline-flex items-center gap-1.5 text-[13px] text-ink-muted hover:text-ink disabled:opacity-50"
               >
                 <ArrowLeft className="size-3.5" />
                 Back
               </button>
-              <span className="inline-flex items-center gap-2 text-[13px] text-ink-muted">
-                <span className="size-1.5 animate-pulse rounded-full bg-healthy" />
-                Your site is already being watched
-              </span>
+              {site && (
+                <span className="inline-flex items-center gap-2 text-[13px] text-ink-muted">
+                  <span className="size-1.5 animate-pulse rounded-full bg-healthy" />
+                  Your site is already being watched
+                </span>
+              )}
             </div>
           </div>
         )}
 
-        {step === 3 && (
+        {step === 3 && result && (
           <div className="animate-fade-up">
             <p className="text-[13px] font-semibold tracking-wide text-accent uppercase">
               Step 3 · Result
@@ -234,18 +305,20 @@ export default function OnboardingPage() {
             <Panel className="mt-6">
               <PanelBody>
                 <div className="flex flex-col items-center gap-5 sm:flex-row">
-                  <HealthGauge score={87} label="Initial health score" size={220} />
+                  <HealthGauge score={site.health_score || 0} label="Initial health score" size={220} />
                   <div className="flex-1">
                     <p className="text-sm leading-relaxed text-ink-soft">
-                      The first scan is complete. We found
-                      <span className="font-semibold text-ink"> 5 issues</span> — 1 critical and 2
-                      warnings. Each one comes with an AI diagnosis and a proposed fix.
+                      The first scan of <span className="font-semibold text-ink">{site.domain}</span> is
+                      complete. We found
+                      <span className="font-semibold text-ink"> {findings.length} issues</span> —{' '}
+                      {scan.critical} critical and {scan.warning} warnings. Each one comes with an AI
+                      diagnosis and a proposed fix.
                     </p>
                     <dl className="mt-4 grid grid-cols-3 divide-x divide-line border-y border-line">
                       {[
-                        ['Critical', '1', 'text-critical'],
-                        ['Warning', '2', 'text-warning'],
-                        ['Optimization', '2', 'text-info'],
+                        ['Critical', String(scan.critical || 0), 'text-critical'],
+                        ['Warning', String(scan.warning || 0), 'text-warning'],
+                        ['Optimization', String(scan.optimization || 0), 'text-info'],
                       ].map(([label, value, tone]) => (
                         <div key={label} className="py-3 pr-3">
                           <dt className="text-xs text-ink-muted">{label}</dt>
@@ -258,17 +331,19 @@ export default function OnboardingPage() {
               </PanelBody>
             </Panel>
 
-            <div className="mt-5 space-y-4">
-              {issues.slice(0, 2).map((issue) => (
-                <IssueChainCard key={issue.id} issue={issue} showChain={false} />
-              ))}
-            </div>
+            {siteIssues.length > 0 && (
+              <div className="mt-5 space-y-4">
+                {siteIssues.slice(0, 2).map((issue) => (
+                  <IssueChainCard key={issue.id} issue={issue} showChain={false} />
+                ))}
+              </div>
+            )}
 
             <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <Link to="/" className="text-[13px] text-ink-muted hover:text-ink">
                 Back to homepage
               </Link>
-              <Button size="lg" onClick={() => navigate('/app/issues')}>
+              <Button size="lg" onClick={() => navigate(`/app/websites/${site.id}`)}>
                 Review issues
                 <ArrowRight className="size-4" />
               </Button>

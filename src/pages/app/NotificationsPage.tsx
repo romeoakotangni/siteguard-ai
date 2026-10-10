@@ -1,19 +1,19 @@
 import { Check, Inbox } from 'lucide-react'
-import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PageHeader } from '../../components/app/AppLayout'
 import { Button } from '../../components/ui/Button'
 import { Panel } from '../../components/ui/Panel'
 import { StatusDot, StatusPill } from '../../components/ui/Status'
 import { EmptyState } from '../../components/ui/Table'
-import { notifications as seed } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
 import { cn } from '../../lib/utils'
 
 export default function NotificationsPage() {
-  const [items, setItems] = useState(seed)
+  const { notifications: items, markNotificationsRead, refreshing } = useRealtime()
   const unread = items.filter((n) => !n.read)
 
-  const markAll = () => setItems((prev) => prev.map((n) => ({ ...n, read: true })))
+  const markAll = () => markNotificationsRead().catch(() => {})
+  const markOne = (id: string) => markNotificationsRead(id).catch(() => {})
 
   return (
     <>
@@ -26,7 +26,7 @@ export default function NotificationsPage() {
         }
         actions={
           <>
-            <Button variant="secondary" onClick={markAll} disabled={unread.length === 0}>
+            <Button variant="secondary" onClick={markAll} disabled={unread.length === 0 || refreshing}>
               <Check className="size-4" />
               Mark all as read
             </Button>
@@ -72,14 +72,13 @@ export default function NotificationsPage() {
                   <span className="text-xs text-ink-faint">{n.time}</span>
                   <button
                     type="button"
-                    onClick={() =>
-                      setItems((prev) =>
-                        prev.map((x) => (x.id === n.id ? { ...x, read: !x.read } : x)),
-                      )
-                    }
-                    className="text-[13px] font-medium text-accent opacity-0 transition-opacity group-hover:opacity-100 hover:underline focus:opacity-100"
+                    onClick={() => {
+                      if (!n.read) markOne(n.id)
+                    }}
+                    disabled={n.read}
+                    className="text-[13px] font-medium text-accent opacity-0 transition-opacity group-hover:opacity-100 hover:underline focus:opacity-100 disabled:opacity-0"
                   >
-                    {n.read ? 'Mark unread' : 'Mark read'}
+                    {n.read ? 'Read' : 'Mark read'}
                   </button>
                 </div>
               </li>

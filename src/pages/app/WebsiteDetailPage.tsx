@@ -11,36 +11,49 @@ import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { Tabs } from '../../components/ui/Tabs'
 import { StatusPill } from '../../components/ui/Status'
 import { EmptyState } from '../../components/ui/Table'
-import { activity, getSite, issues as allIssues, siteIssues, siteTabs } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
+import type { Issue } from '../../lib/realtime'
+
+const siteTabs = ['Overview', 'Issues', 'Performance', 'SEO', 'Forms', 'Security', 'Activity']
 
 const tabContent: Record<string, { title: string; description: string }> = {
   Performance: {
     title: 'Core Web Vitals',
-    description: 'Measured on mobile and desktop, 7-day history.',
+    description: 'Measured on every scan · latest response time and payload.',
   },
   SEO: {
     title: 'Technical SEO',
-    description: 'Sitemap, robots.txt, metadata and indexation.',
+    description: 'Metadata, structure, sitemap and robots.txt checks from the last scan.',
   },
   Forms: {
     title: 'Form monitoring',
-    description: 'End-to-end submission tests across all forms.',
+    description: 'Forms detected during the scan and their submission configuration.',
   },
   Security: {
     title: 'Security headers',
-    description: 'Basic exposure checks performed every hour.',
+    description: 'HTTP security headers and exposure checks from the last scan.',
   },
 }
 
 export default function WebsiteDetailPage() {
-  const { siteId = 'acme-studio' } = useParams()
-  const site = getSite(siteId) ?? getSite('acme-studio')!
+  const { siteId = '' } = useParams()
+  const { getSite, siteIssues, issues: allIssues, activity, scanWebsite, refreshing } = useRealtime()
+  const site = siteId ? getSite(siteId) : undefined
   const [tab, setTab] = useState('Overview')
-  const issues = useMemo(() => siteIssues(site.id), [site.id])
+  const issues = useMemo(() => (site ? siteIssues(site.id) : []), [site, siteIssues])
 
   const critical = issues.filter((i) => i.severity === 'critical').length
   const warning = issues.filter((i) => i.severity === 'warning').length
   const optimization = issues.filter((i) => i.severity === 'optimization').length
+
+  if (!site) {
+    return (
+      <EmptyState
+        title="Website not found"
+        description="This site may have been removed or you do not have access to it."
+      />
+    )
+  }
 
   return (
     <>
@@ -65,9 +78,9 @@ export default function WebsiteDetailPage() {
               <Settings className="size-4" />
               Settings
             </Button>
-            <Button>
+            <Button onClick={() => scanWebsite(site.id).catch(() => {})} disabled={refreshing}>
               <Play className="size-4" />
-              Run scan
+              {refreshing ? 'Scanning…' : 'Run scan'}
             </Button>
           </>
         }
@@ -92,7 +105,7 @@ export default function WebsiteDetailPage() {
               action={
                 <span className="inline-flex items-center gap-1.5 text-xs font-medium text-accent">
                   <Sparkles className="size-3.5" />
-                  Monitor Agent · 2 min ago
+                  Monitor Agent · last scan
                 </span>
               }
             />
@@ -242,12 +255,10 @@ export default function WebsiteDetailPage() {
             </PanelBody>
           </Panel>
           <Panel>
-            <PanelHeader title="Latest resolution" subtitle="Issue #1042 · broken link" />
+            <PanelHeader title="Latest resolution" subtitle="Most recently resolved issue" />
             <PanelBody>
               <ResolutionTimeline
-                steps={
-                  allIssues.find((i) => i.id === '1042')?.timeline ?? []
-                }
+                steps={[...allIssues].reverse().find((i) => i.status === 'resolved')?.timeline ?? []}
               />
             </PanelBody>
           </Panel>
@@ -259,10 +270,10 @@ export default function WebsiteDetailPage() {
           <PanelHeader
             title={tabContent[tab].title}
             subtitle={tabContent[tab].description}
-            action={<Button size="sm">Run scan</Button>}
+            action={<Button size="sm" onClick={() => scanWebsite(site.id).catch(() => {})} disabled={refreshing}>Run scan</Button>}
           />
           <PanelBody>
-            <DimensionContent tab={tab} />
+            <DimensionContent tab={tab} issues={issues} />
           </PanelBody>
         </Panel>
       )}
@@ -270,32 +281,28 @@ export default function WebsiteDetailPage() {
   )
 }
 
-function DimensionContent({ tab }: { tab: string }) {
+function DimensionContent({ tab, issues }: { tab: string; issues: Issue[] }) {
+  const cat = (c: string) => issues.filter((i) => i.category === c)
+  const perIssue = (c: string): { label: string; value: string; percent: number; tone: 'healthy' | 'warning' | 'critical' }[] => {
+    const rows: { label: string; value: string; percent: number; tone: 'healthy' | 'warning' | 'critical' }[] = []
+    for (const i of cat(c)) {
+      const tone = i.severity === 'critical' ? 'critical' : i.severity === 'warning' ? 'warning' : 'healthy'
+      const percent = i.confidence
+      rows.push({ label: i.title, value: i.path === '/' ? 'homepage' : i.path, percent, tone })
+    }
+    if (rows.length === 0) {
+      rows.push({ label: c === 'Forms' ? 'Forms checked' : c === 'Security' ? 'Security headers' : c === 'SEO' ? 'Technical SEO' : 'Core Web Vitals', value: 'No open issues', percent: 100, tone: 'healthy' })
+    }
+    return rows
+  }
+
   const map: Record<string, { label: string; value: string; percent: number; tone: 'healthy' | 'warning' | 'critical' }[]> = {
-    Performance: [
-      { label: 'LCP · Largest Contentful Paint', value: '2.1 s', percent: 84, tone: 'healthy' },
-      { label: 'INP · Interaction to Next Paint', value: '120 ms', percent: 92, tone: 'healthy' },
-      { label: 'CLS · Cumulative Layout Shift', value: '0.04', percent: 96, tone: 'healthy' },
-      { label: 'TTFB · Time to First Byte', value: '310 ms', percent: 78, tone: 'warning' },
-    ],
-    SEO: [
-      { label: 'Indexability', value: '100%', percent: 100, tone: 'healthy' },
-      { label: 'Sitemap validity', value: '63/63 URLs', percent: 100, tone: 'healthy' },
-      { label: 'robots.txt', value: 'Valid', percent: 100, tone: 'healthy' },
-      { label: 'Metadata coverage', value: '89%', percent: 89, tone: 'warning' },
-    ],
-    Forms: [
-      { label: 'Contact form', value: 'Passing', percent: 100, tone: 'healthy' },
-      { label: 'Newsletter signup', value: 'Passing', percent: 100, tone: 'healthy' },
-      { label: 'Quote request', value: 'Passing', percent: 100, tone: 'healthy' },
-      { label: 'Last test run', value: '18 min ago', percent: 100, tone: 'healthy' },
-    ],
-    Security: [
-      { label: 'HTTPS & certificate', value: 'Valid · 74 days', percent: 100, tone: 'healthy' },
-      { label: 'Security headers', value: '4 of 5', percent: 80, tone: 'warning' },
-      { label: 'Mixed content', value: 'None', percent: 100, tone: 'healthy' },
-      { label: 'Exposed assets', value: 'None', percent: 100, tone: 'healthy' },
-    ],
+    Performance: cat('Performance').length
+      ? perIssue('Performance')
+      : [{ label: 'Response', value: 'within target', percent: 100, tone: 'healthy' }],
+    SEO: perIssue('SEO'),
+    Forms: perIssue('Forms'),
+    Security: perIssue('Security'),
   }
 
   return (

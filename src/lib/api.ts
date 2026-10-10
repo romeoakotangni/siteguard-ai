@@ -39,6 +39,34 @@ export const api = {
     stop: (agentId: string) => request('/agents/stop', { method: 'POST', body: JSON.stringify({ agentId }) }),
     status: () => request('/agents/status'),
   },
+  websites: {
+    list: () => request('/websites/list'),
+    create: (payload: { url: string; name?: string; client?: string }) => request('/websites/create', { method: 'POST', body: JSON.stringify(payload) }),
+    scan: (websiteId: string) => request('/websites/scan', { method: 'POST', body: JSON.stringify({ websiteId }) }),
+    delete: (websiteId: string) => request('/websites/delete', { method: 'POST', body: JSON.stringify({ websiteId }) }),
+  },
+  issues: {
+    list: (params?: { site?: string; status?: string; severity?: string }) => {
+      const qs = new URLSearchParams(params as any).toString();
+      return request(`/issues/list${qs ? `?${qs}` : ''}`);
+    },
+    update: (payload: { issueId: string; status: string }) => request('/issues/update', { method: 'POST', body: JSON.stringify(payload) }),
+  },
+  notifications: {
+    list: () => request('/notifications/list'),
+    read: (id?: string) => request('/notifications/read', { method: 'POST', body: JSON.stringify({ id }) }),
+  },
+  dashboard: {
+    overview: () => request('/dashboard/overview'),
+    activity: () => request('/dashboard/activity'),
+  },
+  billing: {
+    summary: () => request('/billing/summary'),
+  },
+  automations: {
+    list: () => request('/automations/list'),
+    update: (payload: { id: string; enabled: boolean }) => request('/automations/update', { method: 'POST', body: JSON.stringify(payload) }),
+  },
   db: {
     status: () => request('/db/status'),
     test: () => request('/db/test'),

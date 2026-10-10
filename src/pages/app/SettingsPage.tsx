@@ -8,7 +8,7 @@ import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { StatusPill } from '../../components/ui/Status'
 import { Tabs, Toggle } from '../../components/ui/Tabs'
 import { Table, Td, Th, Tr } from '../../components/ui/Table'
-import { workspace } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
 
 const tabs = ['General', 'Monitoring', 'Notifications', 'Team', 'Integrations']
 
@@ -28,14 +28,16 @@ const integrations = [
 ]
 
 export default function SettingsPage() {
+  const { workspace, updateProfile } = useRealtime()
   const [tab, setTab] = useState('General')
+  const [name, setName] = useState(workspace.name)
 
   return (
     <>
       <PageHeader
         title="Settings"
         subtitle={`${workspace.name} · ${workspace.plan} plan`}
-        actions={<Button>Save changes</Button>}
+        actions={<Button onClick={() => updateProfile(name).catch(() => {})}>Save changes</Button>}
       />
 
       <Tabs items={tabs.map((t) => ({ id: t, label: t }))} value={tab} onChange={setTab} className="mb-6" />
@@ -46,7 +48,7 @@ export default function SettingsPage() {
             <PanelHeader title="Workspace" />
             <PanelBody className="space-y-4">
               <Field label="Workspace name">
-                <Input defaultValue={workspace.name} />
+                <Input value={name} onChange={(e) => setName(e.target.value)} />
               </Field>
               <Field label="Workspace URL" hint="Used for client-facing report links.">
                 <Input defaultValue="app.siteguard.ai/northline" />

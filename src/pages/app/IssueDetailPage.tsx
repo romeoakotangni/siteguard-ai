@@ -1,6 +1,6 @@
 import { ArrowRight, Check, Copy, ShieldCheck, Sparkles, Wand2, X } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { PageHeader } from '../../components/app/AppLayout'
 import { ResolutionTimeline } from '../../components/Timeline'
 import { Button } from '../../components/ui/Button'
@@ -8,14 +8,17 @@ import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { SeverityBadge, StatusPill } from '../../components/ui/Status'
 import { Toggle } from '../../components/ui/Tabs'
 import { EmptyState } from '../../components/ui/Table'
-import { getIssue, getSite, issues as allIssues, type IssueTimelineStep } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
+import type { IssueTimelineStep } from '../../data/mock'
 import { cn } from '../../lib/utils'
 
 type Phase = 'review' | 'applying' | 'verified'
 
 export default function IssueDetailPage() {
-  const { issueId = '1042' } = useParams()
-  const issue = getIssue(issueId)
+  const { issueId = '' } = useParams()
+  const navigate = useNavigate()
+  const { getIssue, getSite, issues: allIssues, updateIssueStatus } = useRealtime()
+  const issue = issueId ? getIssue(issueId) : undefined
   const [phase, setPhase] = useState<Phase>('review')
   const [autoApprove, setAutoApprove] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -45,7 +48,8 @@ export default function IssueDetailPage() {
   const site = getSite(issue.siteId)
   const resolved = phase === 'verified'
 
-  function applyFix() {
+  async function applyFix() {
+    if (!issue) return
     setPhase('applying')
     const next: IssueTimelineStep[] = [
       { time: '10:48', agent: 'Workflow', label: 'Fix approved', state: 'done' },
@@ -53,15 +57,14 @@ export default function IssueDetailPage() {
       { time: '10:49', agent: 'Monitor Agent', label: 'Verification completed · HTTP 200', state: 'done' },
       { time: '10:49', agent: 'Workflow', label: 'Issue resolved', state: 'done' },
     ]
-    setTimeout(() => {
-      setSteps((prev) => {
-        const kept = prev.filter(
-          (s) => !['Apply correction', 'Verify fix · confirm 200', 'Issue resolved'].includes(s.label),
-        )
-        return [...kept, ...next]
-      })
-      setPhase('verified')
-    }, 1400)
+    await updateIssueStatus(issue.id, 'resolved').catch(() => {})
+    setSteps((prev) => {
+      const kept = prev.filter(
+        (s) => !['Apply correction', 'Verify fix · confirm 200', 'Issue resolved'].includes(s.label),
+      )
+      return [...kept, ...next]
+    })
+    setPhase('verified')
   }
 
   function copyFix() {
@@ -113,7 +116,7 @@ export default function IssueDetailPage() {
             </Link>
           ) : (
             <>
-              <Button variant="ghost" onClick={() => undefined}>
+              <Button variant="ghost" onClick={() => { void updateIssueStatus(issue.id, 'ignored').finally(() => navigate('/app/issues')) }}>
                 <X className="size-4" />
                 Ignore
               </Button>
@@ -248,7 +251,7 @@ export default function IssueDetailPage() {
                 <div className="flex items-center gap-2">
                   {!resolved && (
                     <>
-                      <Button variant="ghost">Ignore</Button>
+                      <Button variant="ghost" onClick={() => { void updateIssueStatus(issue.id, 'ignored').finally(() => navigate('/app/issues')) }}>Ignore</Button>
                       <Button onClick={applyFix} disabled={phase === 'applying'}>
                         {phase === 'applying' ? 'Applying…' : 'Review & Fix'}
                       </Button>

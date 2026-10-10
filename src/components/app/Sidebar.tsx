@@ -11,14 +11,14 @@ import {
   ShieldAlert,
 } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
-import { overview, workspace } from '../../data/mock'
+import { useRealtime } from '../../lib/realtime'
 import { cn } from '../../lib/utils'
 import { Logo } from '../Logo'
 
-const nav = [
+const baseNav = [
   { to: '/app', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/app/websites', label: 'Websites', icon: Globe },
-  { to: '/app/issues', label: 'Issues', icon: ShieldAlert, badge: overview.issues },
+  { to: '/app/issues', label: 'Issues', icon: ShieldAlert },
   { to: '/app/agents', label: 'AI Agents', icon: Bot },
   { to: '/app/automations', label: 'Automations', icon: Plug },
   { to: '/app/reports', label: 'Reports', icon: Megaphone },
@@ -27,7 +27,18 @@ const nav = [
 
 const secondary = [{ to: '/app/settings', label: 'Settings', icon: Settings }]
 
+const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0].toUpperCase())
+    .join('') || 'WS'
+
 export function Sidebar() {
+  const { overview, workspace } = useRealtime()
+  const nav = baseNav.map((item) => (item.to === '/app/issues' ? { ...item, badge: overview.issues } : item))
+
   return (
     <aside className="hidden w-60 shrink-0 flex-col border-r border-line bg-surface lg:flex">
       <div className="flex h-14 items-center border-b border-line px-4">
@@ -42,7 +53,7 @@ export function Sidebar() {
           className="flex w-full items-center gap-2.5 rounded-md border border-line bg-canvas px-2.5 py-2 text-left transition-colors hover:border-line-strong"
         >
           <span className="flex size-6 items-center justify-center rounded bg-ink text-[10px] font-bold text-white">
-            NA
+            {initials(workspace.name)}
           </span>
           <span className="min-w-0 flex-1">
             <span className="block truncate text-[13px] font-semibold text-ink">
