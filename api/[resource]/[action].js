@@ -422,6 +422,8 @@ ALTER TABLE websites ADD COLUMN IF NOT EXISTS uptime TEXT DEFAULT '—';
 ALTER TABLE websites ADD COLUMN IF NOT EXISTS response_ms INTEGER DEFAULT 0;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS payload JSONB;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS fingerprint TEXT;
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS github_repo TEXT;
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS github_branch TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_fingerprint ON issues(fingerprint) WHERE fingerprint IS NOT NULL;
 `;
 
@@ -1735,6 +1737,227 @@ function tryParsePatch(text) {
   }
 }
 
+async function githubLink(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { websiteId, repo, branch } = req.body || {};
+    if (!websiteId || !repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+      return KO(res, 'websiteId et repo (owner/name) requis');
+    }
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+    const w = await sql`UPDATE websites SET github_repo=${repo}, github_branch=${branch || null}, updated_at=NOW()
+      WHERE id=${websiteId} AND workspace_id=${workspaceId} RETURNING *`;
+    if (w.rows.length === 0) return KO(res, 'Site introuvable', 404);
+
+    const info = await githubRepoInfo(repo);
+    if (info && !info.default_branch && !branch) {
+      return OK(res, { website: w.rows[0], linked: true, warning: 'Impossible de vérifier le dépôt (token GitHub requis).' });
+    }
+    if (info && info.error) {
+      return KO(res, `GitHub: ${info.error}`, 400);
+    }
+    if (!branch && info?.default_branch) {
+      await sql`UPDATE websites SET github_branch=${info.default_branch} WHERE id=${websiteId}`;
+      const w2 = await sql`SELECT * FROM websites WHERE id=${websiteId}`;
+      return OK(res, { website: w2.rows[0], linked: true, default_branch: info.default_branch });
+    }
+    return OK(res, { website: w.rows[0], linked: true });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur liaison GitHub', 500);
+  }
+}
+
+async function githubStatus(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'GET')) return;
+  try {
+    const websiteId = req.query?.websiteId || '';
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+    const w = await sql`SELECT id, github_repo, github_branch FROM websites WHERE id=${websiteId} AND workspace_id=${workspaceId}`;
+    if (w.rows.length === 0) return KO(res, 'Site introuvable', 404);
+    const row = w.rows[0];
+    const info = row.github_repo ? await githubRepoInfo(row.github_repo) : null;
+    return OK(res, {
+      linked: Boolean(row.github_repo),
+      repo: row.github_repo || null,
+      branch: row.github_branch || null,
+      ok: Boolean(row.github_repo) && info?.default_branch ? true : false,
+      reason: !row.github_repo ? 'no_repo' : info?.error || 'ok',
+      default_branch: info?.default_branch || row.github_branch || null,
+    });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur statut GitHub', 500);
+  }
+}
+
+async function githubApply(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { issueId } = req.body || {};
+    if (!issueId) return KO(res, 'issueId requis');
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+    const rows = await sql`SELECT * FROM issues WHERE id=${issueId} AND workspace_id=${workspaceId}`;
+    if (rows.rows.length === 0) return KO(res, 'Issue introuvable', 404);
+    const issue = rows.rows[0];
+    const payload = issue.payload || {};
+
+    const wp = await sql`SELECT * FROM websites WHERE id=${issue.website_id}`;
+    const website = wp.rows[0];
+    if (!website?.github_repo) return KO(res, `Aucun dépôt GitHub lié à ${website?.domain}. Liez un dépôt puis relancez.`, 400);
+
+    const planData = await getEffectivePlan(user.id);
+    if (planData.limits.autoFixesPerMonth < Number.POSITIVE_INFINITY) {
+      const used = await sql`
+        SELECT count(*)::int AS n FROM issues
+        WHERE workspace_id=${workspaceId} AND (payload->>'patch') IS NOT NULL
+          AND (payload->>'patchGeneratedAt')::timestamptz >= NOW() - interval '30 days'
+      `;
+      if ((used.rows[0]?.n || 0) >= planData.limits.autoFixesPerMonth) {
+        return paywall(res, planData, `Quota d'autocorrections atteint (${planData.limits.autoFixesPerMonth}/mois). Passez à Pro pour des corrections illimitées.`, 402);
+      }
+    }
+
+    let patch = payload.patch;
+    if (!patch) {
+      const site = await sql`SELECT domain FROM websites WHERE id=${issue.website_id}`;
+      patch = await generatePatch({ issue, payload, domain: site.rows[0]?.domain || '' });
+      await sql`UPDATE issues SET payload = payload || ${JSON.stringify({ patch, patchGeneratedAt: new Date().toISOString() })}::JSONB, updated_at=NOW() WHERE id=${issueId}`;
+    }
+
+    const result = await githubOpenPr({
+      repo: website.github_repo,
+      branch: website.github_branch || (await githubRepoInfo(website.github_repo))?.default_branch || 'main',
+      patch,
+      issue,
+      domain: website.domain,
+    });
+
+    await sql`UPDATE issues SET payload = payload || ${JSON.stringify({ githubPr: { url: result.html_url, number: result.number, branch: result.head } })}::JSONB, updated_at=NOW() WHERE id=${issueId}`;
+    const updated = await sql`SELECT * FROM issues WHERE id=${issueId}`;
+    return OK(res, { issue: updated.rows[0], pullRequest: result }, 201);
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur application GitHub', 500);
+  }
+}
+
+async function githubRepoInfo(repo) {
+  const token = env('GITHUB_TOKEN');
+  if (!token) return { error: 'GITHUB_TOKEN manquante sur Vercel' };
+  try {
+    const r = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: githubHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) return { error: `HTTP ${r.status} (token invalide ou dépôt inaccessible)` };
+    const j = await r.json();
+    return { full: j, default_branch: j.default_branch, error: null };
+  } catch (e) {
+    return { error: String(e?.message || e) };
+  }
+}
+
+function githubHeaders() {
+  const token = env('GITHUB_TOKEN');
+  const h = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json',
+  };
+  if (token) h.Authorization = `Bearer ${token}`;
+  return h;
+}
+
+async function githubOpenPr({ repo, branch, patch, issue, domain }) {
+  const token = env('GITHUB_TOKEN');
+  if (!token) throw new Error('GITHUB_TOKEN manquante sur Vercel — configurez-la pour appliquer les corrections');
+  const head = `siteguard-fix-${String(issue.id || '').slice(0, 6)}-${Date.now().toString(36)}`;
+  const slug = new Date().toISOString();
+
+  const ref = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`, {
+    headers: githubHeaders(),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!ref.ok) throw new Error(`Branche "${branch}" introuvable sur ${repo} (${ref.status})`);
+  const baseSha = (await ref.json()).object.sha;
+
+  const filePath = String(patch.file || 'fix.md').trim();
+  const content = String(patch.after || '');
+  const blob = await fetch(`https://api.github.com/repos/${repo}/git/blobs`, {
+    method: 'POST',
+    headers: githubHeaders(),
+    body: JSON.stringify({ content, encoding: 'utf-8' }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!blob.ok) throw new Error(`GitHub blob ${blob.status}: ${(await blob.text()).slice(0, 200)}`);
+  const blobSha = (await blob.json()).sha;
+
+  const tree = await fetch(`https://api.github.com/repos/${repo}/git/trees`, {
+    method: 'POST',
+    headers: githubHeaders(),
+    body: JSON.stringify({
+      base_tree: baseSha,
+      tree: [{ path: filePath, mode: '100644', type: 'blob', sha: blobSha }],
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!tree.ok) throw new Error(`GitHub tree ${tree.status}: ${(await tree.text()).slice(0, 200)}`);
+  const treeSha = (await tree.json()).sha;
+
+  const commit = await fetch(`https://api.github.com/repos/${repo}/git/commits`, {
+    method: 'POST',
+    headers: githubHeaders(),
+    body: JSON.stringify({
+      message: `fix: ${issue.title} · SiteGuard AI (${slug})`,
+      tree: treeSha,
+      parents: [baseSha],
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!commit.ok) throw new Error(`GitHub commit ${commit.status}: ${(await commit.text()).slice(0, 200)}`);
+  const commitSha = (await commit.json()).sha;
+
+  const createRef = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
+    method: 'POST',
+    headers: githubHeaders(),
+    body: JSON.stringify({ ref: `refs/heads/${head}`, sha: commitSha }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!createRef.ok && createRef.status !== 422) {
+    throw new Error(`GitHub ref ${createRef.status}: ${(await createRef.text()).slice(0, 200)}`);
+  }
+
+  const existing = await fetch(`https://api.github.com/repos/${repo}/pulls?head=${repo.split('/')[0]}:${head}&state=open`, {
+    headers: githubHeaders(),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (existing.ok) {
+    const list = await existing.json();
+    if (Array.isArray(list) && list.length > 0) return list[0];
+  }
+
+  const pr = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+    method: 'POST',
+    headers: githubHeaders(),
+    body: JSON.stringify({
+      title: `fix: ${issue.title}`,
+      head,
+      base: branch,
+      body: `Correction générée par SiteGuard AI pour **${domain}**.\n\n## Problème\n${issue.title}\n\n## Changement\n${patch.change || ''}\n\n## Fichier\n\`${filePath}\`\n\n### Avant\n\`\`\`\n${(patch.before || 'absent').slice(0, 1500)}\n\`\`\`\n\n### Après\n\`\`\`\n${content.slice(0, 2500)}\n\`\`\`\n\n### Étapes validées par l'agent\n${(patch.instructions || '').slice(0, 1200)}\n`,
+    }),
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!pr.ok) throw new Error(`GitHub PR ${pr.status}: ${(await pr.text()).slice(0, 220)}`);
+  return pr.json();
+}
+
 async function notificationsList(req, res) {
   const user = requireAuth(req, res);
   if (!user) return;
@@ -1958,6 +2181,9 @@ const ROUTES = {
   'issues/list': issuesList,
   'issues/update': issuesUpdate,
   'issues/fix': issuesFix,
+  'github/link': githubLink,
+  'github/status': githubStatus,
+  'github/apply': githubApply,
   'notifications/list': notificationsList,
   'notifications/read': notificationsRead,
   'dashboard/overview': dashboardOverview,

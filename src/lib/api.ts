@@ -58,6 +58,11 @@ export const api = {
     update: (payload: { issueId: string; status: string }) => request('/issues/update', { method: 'POST', body: JSON.stringify(payload) }),
     fix: (payload: { issueId: string }) => request('/issues/fix', { method: 'POST', body: JSON.stringify(payload) }),
   },
+  github: {
+    link: (payload: { websiteId: string; repo: string; branch?: string }) => request('/github/link', { method: 'POST', body: JSON.stringify(payload) }),
+    status: (params: { websiteId: string }) => request(`/github/status?${new URLSearchParams(params).toString()}`),
+    apply: (payload: { issueId: string }) => request('/github/apply', { method: 'POST', body: JSON.stringify(payload) }),
+  },
   notifications: {
     list: () => request('/notifications/list'),
     read: (id?: string) => request('/notifications/read', { method: 'POST', body: JSON.stringify({ id }) }),

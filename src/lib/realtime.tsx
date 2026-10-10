@@ -20,6 +20,8 @@ export interface Website {
   responseMs: number
   plan: 'Starter' | 'Pro' | 'Agency'
   connectedAt: string
+  githubRepo?: string | null
+  githubBranch?: string | null
 }
 
 export interface IssueTimelineStep {
@@ -148,6 +150,8 @@ subscription: Subscription | null
   deleteWebsite: (websiteId: string) => Promise<any>
   updateIssueStatus: (issueId: string, status: string) => Promise<any>
   generateFix: (issueId: string) => Promise<any>
+  linkGithub: (websiteId: string, repo: string, branch?: string) => Promise<any>
+  applyGithubFix: (issueId: string) => Promise<any>
   markNotificationsRead: (id?: string) => Promise<any>
   toggleAutomation: (id: string, enabled: boolean) => Promise<any>
   subscribe: (planCode: string) => Promise<any>
@@ -206,6 +210,8 @@ function toWebsite(row: any, issues: Issue[]): Website {
     responseMs: Number(row.response_ms) || 0,
     plan: (row.plan || 'Starter') as Website['plan'],
     connectedAt: row.connected_at || row.created_at,
+    githubRepo: row.github_repo || null,
+    githubBranch: row.github_branch || null,
   }
 }
 
@@ -442,6 +448,18 @@ const generateFix = useCallback(async (issueId: string) => {
     return r
   }, [guard, refresh])
 
+  const linkGithub = useCallback(async (websiteId: string, repo: string, branch?: string) => {
+    const r = await guard(() => api.github.link({ websiteId, repo, branch }))
+    await refresh()
+    return r
+  }, [guard, refresh])
+
+  const applyGithubFix = useCallback(async (issueId: string) => {
+    const r = await guard(() => api.github.apply({ issueId }))
+    await refresh()
+    return r
+  }, [guard, refresh])
+
   const markNotificationsRead = useCallback(async (id?: string) => {
     const r = await api.notifications.read(id)
     await refresh()
@@ -474,12 +492,14 @@ const generateFix = useCallback(async (issueId: string) => {
       deleteWebsite,
       updateIssueStatus,
       generateFix,
+      linkGithub,
+      applyGithubFix,
       markNotificationsRead,
       toggleAutomation,
       subscribe,
       updateProfile,
     }),
-    [state, getSite, getIssue, siteIssues, refresh, clearPaywall, connectWebsite, scanWebsite, deleteWebsite, updateIssueStatus, generateFix, markNotificationsRead, toggleAutomation, subscribe, updateProfile],
+    [state, getSite, getIssue, siteIssues, refresh, clearPaywall, connectWebsite, scanWebsite, deleteWebsite, updateIssueStatus, generateFix, linkGithub, applyGithubFix, markNotificationsRead, toggleAutomation, subscribe, updateProfile],
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

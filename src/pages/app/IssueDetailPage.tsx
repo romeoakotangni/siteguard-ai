@@ -17,13 +17,16 @@ type Phase = 'review' | 'applying' | 'verified'
 export default function IssueDetailPage() {
   const { issueId = '' } = useParams()
   const navigate = useNavigate()
-  const { getIssue, getSite, issues: allIssues, updateIssueStatus, generateFix } = useRealtime()
+  const { getIssue, getSite, issues: allIssues, updateIssueStatus, generateFix, applyGithubFix } = useRealtime()
   const issue = issueId ? getIssue(issueId) : undefined
   const [phase, setPhase] = useState<Phase>('review')
   const [autoApprove, setAutoApprove] = useState(false)
   const [copied, setCopied] = useState(false)
   const [fixing, setFixing] = useState(false)
   const [fixError, setFixError] = useState('')
+  const [prBusy, setPrBusy] = useState(false)
+  const [prError, setPrError] = useState('')
+  const [prUrl, setPrUrl] = useState('')
   const [steps, setSteps] = useState<IssueTimelineStep[]>(issue?.timeline ?? [])
   const [activeIssueId, setActiveIssueId] = useState(issue?.id)
 
@@ -97,6 +100,24 @@ export default function IssueDetailPage() {
     navigator.clipboard?.writeText(issue?.patch?.after ?? issue?.fixDetail ?? '')
     setCopied(true)
     setTimeout(() => setCopied(false), 1600)
+  }
+
+  async function applyGithub() {
+    if (!issue) return
+    setPrBusy(true)
+    setPrError('')
+    setPrUrl('')
+    try {
+      const r = await applyGithubFix(issue.id)
+      const pr = r?.pullRequest
+      if (pr?.html_url) setPrUrl(pr.html_url)
+      else setPrUrl('')
+    } catch (e: any) {
+      const msg = String(e?.message || e || '')
+      setPrError(msg.startsWith('Error:') ? msg.slice(7) : msg)
+    } finally {
+      setPrBusy(false)
+    }
   }
 
   return (
@@ -250,6 +271,26 @@ export default function IssueDetailPage() {
                 </div>
               )}
               {fixError && <p className="mt-2 text-xs text-critical">{fixError}</p>}
+              {!resolved && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {site?.githubRepo && (
+                    <Button variant="secondary" size="sm" onClick={applyGithub} disabled={prBusy}>
+                      {prBusy ? 'Création PR…' : 'Appliquer via GitHub (PR)'}
+                    </Button>
+                  )}
+                  {prUrl && (
+                    <a
+                      href={prUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-accent underline"
+                    >
+                      Voir la pull request →
+                    </a>
+                  )}
+                  {prError && <span className="text-xs text-critical">{prError}</span>}
+                </div>
+              )}
               <p className="mt-2 text-xs text-ink-muted">
                 {issue.patch ? 'Correction générée par le Fix Agent · sauvegardée sur votre compte · appliquez-la via votre hébergeur' : 'Générée par le Fix Agent · prête à appliquer'}
               </p>

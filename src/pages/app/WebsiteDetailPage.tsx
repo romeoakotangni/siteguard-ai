@@ -5,6 +5,7 @@ import { PageHeader } from '../../components/app/AppLayout'
 import { IssueChainCard } from '../../components/IssueChainCard'
 import { ActivityFeed, ResolutionTimeline } from '../../components/Timeline'
 import { Button } from '../../components/ui/Button'
+import { Input } from '../../components/ui/Input'
 import { HealthGauge, ScoreChip } from '../../components/ui/HealthGauge'
 import { MetricBar, Sparkline } from '../../components/ui/Metric'
 import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
@@ -37,9 +38,13 @@ const tabContent: Record<string, { title: string; description: string }> = {
 
 export default function WebsiteDetailPage() {
   const { siteId = '' } = useParams()
-  const { getSite, siteIssues, issues: allIssues, activity, scanWebsite, refreshing } = useRealtime()
+  const { getSite, siteIssues, issues: allIssues, activity, scanWebsite, refreshing, linkGithub } = useRealtime()
   const site = siteId ? getSite(siteId) : undefined
   const [tab, setTab] = useState('Overview')
+  const [repo, setRepo] = useState('')
+  const [branch, setBranch] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [gitErr, setGitErr] = useState('')
   const issues = useMemo(() => (site ? siteIssues(site.id) : []), [site, siteIssues])
 
   const critical = issues.filter((i) => i.severity === 'critical').length
@@ -182,6 +187,76 @@ export default function WebsiteDetailPage() {
                   height={36}
                 />
               </div>
+            </PanelBody>
+          </Panel>
+
+          <Panel>
+            <PanelHeader title="Déploiement GitHub" subtitle="Corrections poussées en pull request" />
+            <PanelBody className="space-y-3 text-sm">
+              {site.githubRepo ? (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-ink-muted">Dépôt</span>
+                    <span className="font-mono text-[13px] text-ink break-all">{site.githubRepo}</span>
+                  </div>
+                  {site.githubBranch && (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-ink-muted">Branche</span>
+                      <span className="font-mono text-[13px] text-ink">{site.githubBranch}</span>
+                    </div>
+                  )}
+                  <div className="inline-flex items-center gap-1.5 rounded-full border border-healthy/25 bg-healthy-tint px-2.5 py-1 text-xs font-semibold text-healthy">
+                    <span className="size-1.5 rounded-full bg-healthy" />
+                    Connecté
+                  </div>
+                  <p className="text-[12px] leading-relaxed text-ink-muted">
+                    Ouvrez une issue pour générer la correction puis « Appliquer via GitHub » pour créer une pull request.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <label className="block text-[13px] font-medium text-ink-muted">Dépôt (owner/repo)</label>
+                    <Input
+                      value={repo}
+                      onChange={(e) => setRepo(e.target.value)}
+                      placeholder="your-studio/client-site"
+                      className="font-mono"
+                    />
+                    <label className="block text-[13px] font-medium text-ink-muted">Branche (optionnel)</label>
+                    <Input
+                      value={branch}
+                      onChange={(e) => setBranch(e.target.value)}
+                      placeholder="main"
+                      className="font-mono"
+                    />
+                  </div>
+                  <Button
+                    size="sm"
+                    disabled={saving || !repo.trim()}
+                    onClick={async () => {
+                      setSaving(true)
+                      setGitErr('')
+                      try {
+                        await linkGithub(site.id, repo.trim(), branch.trim() || undefined)
+                        setRepo('')
+                        setBranch('')
+                      } catch (e: any) {
+                        const msg = String(e?.message || e || '')
+                        setGitErr(msg.startsWith('Error:') ? msg.slice(7) : msg)
+                      } finally {
+                        setSaving(false)
+                      }
+                    }}
+                  >
+                    {saving ? 'Liaison…' : 'Connecter le dépôt'}
+                  </Button>
+                  {gitErr && <p className="text-xs text-critical">{gitErr}</p>}
+                  <p className="text-[12px] leading-relaxed text-ink-muted">
+                    Indiquez le dépôt GitHub du site. SiteGuard crée une branche + pull request par correction.
+                  </p>
+                </>
+              )}
             </PanelBody>
           </Panel>
 
