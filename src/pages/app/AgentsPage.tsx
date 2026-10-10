@@ -43,7 +43,7 @@ export default function AgentsPage() {
     const load = async () => {
       try {
         const res: any = await api.agents.list()
-        const list = (res.data?.agents || []).map((a: any) => ({
+        const list = (res?.agents || []).map((a: any) => ({
           ...a,
           scope: 'Realtime',
           role: a.type || 'Agent',
@@ -70,7 +70,7 @@ export default function AgentsPage() {
       setRunning((r) => ({ ...r, [agent.id]: true }))
       await api.agents.run(agent.id, agent.type)
       const res: any = await api.agents.list()
-      const list = (res.data?.agents || []).map((a: any) => ({
+      const list = (res?.agents || []).map((a: any) => ({
         ...a,
         scope: 'Realtime',
         role: a.type || 'Agent',
@@ -92,7 +92,7 @@ export default function AgentsPage() {
       setRunning((r) => ({ ...r, [agent.id]: true }))
       await api.agents.stop(agent.id)
       const res: any = await api.agents.list()
-      const list = (res.data?.agents || []).map((a: any) => ({
+      const list = (res?.agents || []).map((a: any) => ({
         ...a,
         scope: 'Realtime',
         role: a.type || 'Agent',

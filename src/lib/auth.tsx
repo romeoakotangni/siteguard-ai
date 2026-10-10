@@ -22,8 +22,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refresh = async () => {
     try {
       const res: any = await api.auth.me();
-      setUser(res.data?.user || null);
-      setWorkspace(res.data?.workspace || null);
+      setUser(res?.user || null);
+      setWorkspace(res?.workspace || null);
     } catch {
       setUser(null);
       setWorkspace(null);
@@ -34,14 +34,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = async (email: string, password: string) => {
     const res: any = await api.auth.login({ email, password });
-    setUser(res.data?.user || null);
-    setWorkspace(res.data?.workspace || null);
+    setUser(res?.user || null);
+    setWorkspace(res?.workspace || null);
   };
 
   const register = async (name: string, email: string, password: string) => {
     const res: any = await api.auth.register({ name, email, password });
-    setUser(res.data?.user || null);
-    setWorkspace(res.data?.workspace || res.data?.workspace || null);
+    setUser(res?.user || null);
+    setWorkspace(res?.workspace || null);
   };
 
   const logout = async () => {

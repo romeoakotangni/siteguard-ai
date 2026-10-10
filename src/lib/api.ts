@@ -14,7 +14,7 @@ async function request<T = any>(path: string, options: RequestInit = {}): Promis
   if (!res.ok) {
     throw new Error(data?.error || `HTTP ${res.status}`);
   }
-  return data as T;
+  return (data && typeof data === 'object' && 'data' in data ? data.data : data) as T;
 }
 
 export const api = {
