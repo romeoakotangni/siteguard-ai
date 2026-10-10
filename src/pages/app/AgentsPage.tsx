@@ -7,7 +7,6 @@ import { Sparkline } from '../../components/ui/Metric'
 import { Panel, PanelBody, PanelHeader } from '../../components/ui/Panel'
 import { StatusPill } from '../../components/ui/Status'
 import { api } from '../../lib/api'
-import RequireSubscription from '../../components/RequireSubscription'
 
 const icons: Record<string, string> = {
   monitor: '🖥',
@@ -110,7 +109,7 @@ export default function AgentsPage() {
   }
 
   return (
-    <RequireSubscription>
+    <>
       <PageHeader
         title="AI Agents"
         subtitle="Agents IA réels — exécutés via OpenRouter (avec fallback)"
@@ -237,6 +236,6 @@ export default function AgentsPage() {
           </p>
         </PanelBody>
       </Panel>
-    </RequireSubscription>
+    </>
   )
 }

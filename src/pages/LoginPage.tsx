@@ -1,29 +1,35 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Logo } from '../components/Logo';
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, user, loading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const from = (location.state as any)?.from || '/app';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loadingForm, setLoadingForm] = useState(false);
+
+  if (loading) return null;
+
+  if (user) return <Navigate to={from} replace />;
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setLoading(true);
+    setLoadingForm(true);
     try {
       await login(email, password);
-      navigate('/app');
+      navigate(from, { replace: true });
     } catch (e: any) {
       setError(e?.message || 'Erreur');
     } finally {
-      setLoading(false);
+      setLoadingForm(false);
     }
   };
 
@@ -45,8 +51,8 @@ export default function LoginPage() {
             <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required />
           </div>
           {error && <p className="text-sm text-critical">{error}</p>}
-          <Button className="w-full" type="submit" disabled={loading}>
-            {loading ? 'Connexion…' : 'Se connecter'}
+          <Button className="w-full" type="submit" disabled={loadingForm}>
+            {loadingForm ? 'Connexion…' : 'Se connecter'}
           </Button>
         </form>
         <p className="text-center text-sm text-ink-muted">

@@ -175,7 +175,7 @@ async function seedWorkspaceData(workspaceId) {
 
 let lastProviderError = null;
 
-async function callOpenRouter(prompt) {
+async function callOpenRouter(prompt, timeoutMs = 20000) {
   const key = env('OPENROUTER_API_KEY');
   if (!key) {
     lastProviderError = 'OPENROUTER_API_KEY manquante';
@@ -185,7 +185,7 @@ async function callOpenRouter(prompt) {
   try {
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
@@ -603,7 +603,7 @@ async function kkiapayCreateCheckout(req, res) {
       transactionId,
       publicKey,
       amount_cfa,
-      callback: `${appUrl()}/billing?status=success&tx=${transactionId}`,
+      callback: `${appUrl()}/app/billing?status=success&tx=${transactionId}`,
       webhook: `${appUrl()}/api/kkiapay/webhook`,
       sandbox: (env('KKIAPAY_SANDBOX', 'true') || 'true').toLowerCase() === 'true',
       plan_code,
@@ -614,6 +614,9 @@ async function kkiapayCreateCheckout(req, res) {
 }
 
 async function kkiapayWebhook(req, res) {
+  if (req.method === 'GET') {
+    return OK(res, { webhook: 'ok' });
+  }
   if (!requireMethod(req, res, 'POST')) return;
   try {
     const raw = JSON.stringify(req.body || {});
@@ -1604,16 +1607,6 @@ async function issuesUpdate(req, res) {
     const dbStatus = allowed[status];
     if (!dbStatus) return KO(res, 'Statut invalide');
     const workspaceId = await firstWorkspace(user.id);
-    const planData = await getEffectivePlan(user.id);
-    if (dbStatus === 'resolved' && planData.limits.autoFixesPerMonth < Number.POSITIVE_INFINITY) {
-      const used = await sql`
-        SELECT count(*)::int AS n FROM issues
-        WHERE workspace_id=${workspaceId} AND status='resolved' AND resolved_at >= date_trunc('month', NOW())
-      `;
-      if ((used.rows[0]?.n || 0) >= planData.limits.autoFixesPerMonth) {
-        return paywall(res, planData, `Quota d'autocorrections mensuel atteint (${planData.limits.autoFixesPerMonth}). Passez à Pro pour des corrections illimitées.`, 402);
-      }
-    }
     let r;
     if (dbStatus === 'resolved') {
       r = await sql`
@@ -1630,6 +1623,115 @@ async function issuesUpdate(req, res) {
     return OK(res, { issue: r.rows[0] });
   } catch (e) {
     return KO(res, e?.message || 'Erreur mise a jour issue', 500);
+  }
+}
+
+async function issuesFix(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
+  if (!requireMethod(req, res, 'POST')) return;
+  try {
+    const { issueId } = req.body || {};
+    if (!issueId) return KO(res, 'issueId requis');
+    const workspaceId = await firstWorkspace(user.id);
+    if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
+    const rows = await sql`SELECT * FROM issues WHERE id=${issueId} AND workspace_id=${workspaceId}`;
+    if (rows.rows.length === 0) return KO(res, 'Issue introuvable', 404);
+    const issue = rows.rows[0];
+    const payload = issue.payload || {};
+
+    const planData = await getEffectivePlan(user.id);
+    if (planData.limits.autoFixesPerMonth < Number.POSITIVE_INFINITY) {
+      const used = await sql`
+        SELECT count(*)::int AS n FROM issues
+        WHERE workspace_id=${workspaceId} AND (payload->>'patch') IS NOT NULL
+          AND (payload->>'patchGeneratedAt')::timestamptz >= NOW() - interval '30 days'
+      `;
+      if ((used.rows[0]?.n || 0) >= planData.limits.autoFixesPerMonth) {
+        return paywall(res, planData, `Quota d'autocorrections atteint (${planData.limits.autoFixesPerMonth}/mois). Passez à Pro pour des corrections illimitées.`, 402);
+      }
+    }
+
+    if (payload.patch) return OK(res, { issue, patch: payload.patch });
+
+    const site = await sql`SELECT domain FROM websites WHERE id=${issue.website_id}`;
+    const domain = site.rows[0]?.domain || 'votre-site.com';
+    const patch = await generatePatch({ issue, payload, domain });
+
+    const updated = await sql`
+      UPDATE issues SET payload = payload || ${JSON.stringify({ patch, patchGeneratedAt: new Date().toISOString() })}::JSONB, updated_at=NOW()
+      WHERE id=${issueId} AND workspace_id=${workspaceId} RETURNING *
+    `;
+    return OK(res, { issue: updated.rows[0], patch });
+  } catch (e) {
+    return KO(res, e?.message || 'Erreur generation correction', 500);
+  }
+}
+
+async function generatePatch({ issue, payload, domain }) {
+  const fallbackAfter =
+    payload.after?.value || 'healthy';
+  const prompt = `Tu es le Fix Agent de SiteGuard AI. Génère une correction RÉELLE et prête à appliquer pour le problème détecté.
+
+Site: ${domain}
+Problème: ${issue.title} (${issue.impact || 'Medium'})
+Chemin: ${issue.path || '/'}
+Diagnostic: ${payload.diagnosis || issue.description || ''}
+Preuves: ${JSON.stringify(payload.evidence || [])}
+Correction recommandée: ${payload.recommendedFix || issue.suggestion || ''}
+Détail proposé: ${payload.fixDetail || ''}
+
+Réponds UNIQUEMENT avec un objet JSON valide sur UNE SEULE LIGNE, en moins de 400 tokens, sans markdown et sans texte autour. Le champ "after" doit contenir LE CODE ou LA CONFIGURATION EXACTE à mettre en place (fichier complet ou bloc), pas une description. Structure :
+{"file":"nom du fichier/config cible (ex: vercel.json, nginx.conf, index.html, robots.txt, sitemap.xml)","change":"résumé court de la modification","before":"contenu actuel exact ou 'absent'","after":"CODE/CONFIG exact à appliquer","instructions":"étapes concrètes numérotées 1. 2. 3. pour l'appliquer"}`;
+  const raw = await callOpenRouter(prompt, 45000);
+  const rawText = raw ? String(raw.output || '').trim() : '';
+  const parsed = tryParsePatch(rawText);
+  if (parsed) {
+    return {
+      file: String(parsed.file || 'voir instructions'),
+      change: String(parsed.change || `Correction appliquée : ${payload.recommendedFix || ''}`),
+      before: String(parsed.before ?? 'absent'),
+      after: String(parsed.after || fallbackAfter),
+      instructions: String(parsed.instructions || payload.recommendedFix || ''),
+      generatedBy: 'Fix Agent (LLM)',
+    };
+  }
+  return {
+    file: 'voir instructions',
+    change: `Correction appliquée : ${payload.recommendedFix || 'problème corrigé'}`,
+    before: 'absent',
+    after: payload.fixDetail || fallbackAfter,
+    instructions: payload.recommendedFix || 'Appliquez le détail fourni par le diagnostic.',
+    generatedBy: 'Fix Agent',
+    raw: rawText.substring(0, 500),
+  };
+}
+
+function tryParsePatch(text) {
+  if (!text) return null;
+  const cleaned = String(text).replace(/```json/gi, '').replace(/```/g, '').trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  const body = cleaned.slice(start, end + 1);
+  try {
+    return JSON.parse(body);
+  } catch (e) {
+    const grab = (key) => {
+      const m = new RegExp('"' + key + '"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*"|[^,}]+)').exec(body);
+      if (!m) return '';
+      const v = m[1].trim();
+      if (v.startsWith('"')) {
+        try {
+          return JSON.parse(v);
+        } catch (e2) {
+          return v;
+        }
+      }
+      return v;
+    };
+    const out = { file: grab('file'), change: grab('change'), before: grab('before'), after: grab('after'), instructions: grab('instructions') };
+    return out.after || out.file ? out : null;
   }
 }
 
@@ -1855,6 +1957,7 @@ const ROUTES = {
   'websites/delete': websitesDelete,
   'issues/list': issuesList,
   'issues/update': issuesUpdate,
+  'issues/fix': issuesFix,
   'notifications/list': notificationsList,
   'notifications/read': notificationsRead,
   'dashboard/overview': dashboardOverview,

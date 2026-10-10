@@ -56,6 +56,7 @@ export const api = {
       return request(`/issues/list${qs ? `?${qs}` : ''}`);
     },
     update: (payload: { issueId: string; status: string }) => request('/issues/update', { method: 'POST', body: JSON.stringify(payload) }),
+    fix: (payload: { issueId: string }) => request('/issues/fix', { method: 'POST', body: JSON.stringify(payload) }),
   },
   notifications: {
     list: () => request('/notifications/list'),

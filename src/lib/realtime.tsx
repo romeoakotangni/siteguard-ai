@@ -52,6 +52,7 @@ export interface Issue {
   seoImpact: 'High' | 'Medium' | 'Low' | 'None'
   timeline: IssueTimelineStep[]
   autoFixable: boolean
+  patch?: { file?: string; change?: string; before?: string; after?: string; instructions?: string; generatedBy?: string } | null
 }
 
 export interface ActivityEvent {
@@ -146,6 +147,7 @@ subscription: Subscription | null
   scanWebsite: (websiteId: string) => Promise<any>
   deleteWebsite: (websiteId: string) => Promise<any>
   updateIssueStatus: (issueId: string, status: string) => Promise<any>
+  generateFix: (issueId: string) => Promise<any>
   markNotificationsRead: (id?: string) => Promise<any>
   toggleAutomation: (id: string, enabled: boolean) => Promise<any>
   subscribe: (planCode: string) => Promise<any>
@@ -232,6 +234,7 @@ function toIssue(row: any): Issue {
     seoImpact: p.seoImpact || 'None',
     timeline: p.timeline || [],
     autoFixable: Boolean(row.auto_fixable),
+    patch: p.patch || null,
   }
 }
 
@@ -433,6 +436,12 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   const updateIssueStatus = useCallback(async (issueId: string, status: string) => guard(() => api.issues.update({ issueId, status })), [guard])
 
+const generateFix = useCallback(async (issueId: string) => {
+    const r = await guard(() => api.issues.fix({ issueId }))
+    await refresh()
+    return r
+  }, [guard, refresh])
+
   const markNotificationsRead = useCallback(async (id?: string) => {
     const r = await api.notifications.read(id)
     await refresh()
@@ -464,12 +473,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       scanWebsite,
       deleteWebsite,
       updateIssueStatus,
+      generateFix,
       markNotificationsRead,
       toggleAutomation,
       subscribe,
       updateProfile,
     }),
-    [state, getSite, getIssue, siteIssues, refresh, clearPaywall, connectWebsite, scanWebsite, deleteWebsite, updateIssueStatus, markNotificationsRead, toggleAutomation, subscribe, updateProfile],
+    [state, getSite, getIssue, siteIssues, refresh, clearPaywall, connectWebsite, scanWebsite, deleteWebsite, updateIssueStatus, generateFix, markNotificationsRead, toggleAutomation, subscribe, updateProfile],
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

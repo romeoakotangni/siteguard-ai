@@ -17,11 +17,13 @@ type Phase = 'review' | 'applying' | 'verified'
 export default function IssueDetailPage() {
   const { issueId = '' } = useParams()
   const navigate = useNavigate()
-  const { getIssue, getSite, issues: allIssues, updateIssueStatus } = useRealtime()
+  const { getIssue, getSite, issues: allIssues, updateIssueStatus, generateFix } = useRealtime()
   const issue = issueId ? getIssue(issueId) : undefined
   const [phase, setPhase] = useState<Phase>('review')
   const [autoApprove, setAutoApprove] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [fixing, setFixing] = useState(false)
+  const [fixError, setFixError] = useState('')
   const [steps, setSteps] = useState<IssueTimelineStep[]>(issue?.timeline ?? [])
   const [activeIssueId, setActiveIssueId] = useState(issue?.id)
 
@@ -29,6 +31,7 @@ export default function IssueDetailPage() {
     setActiveIssueId(issue.id)
     setSteps(issue.timeline)
     setPhase('review')
+    setFixError('')
   }
 
   if (!issue) {
@@ -48,27 +51,50 @@ export default function IssueDetailPage() {
   const site = getSite(issue.siteId)
   const resolved = phase === 'verified'
 
+  async function generateCorrection() {
+    if (!issue) return
+    setFixing(true)
+    setFixError('')
+    try {
+      await generateFix(issue.id)
+    } catch (e: any) {
+      setFixError(e?.message || 'Erreur de génération de la correction')
+    } finally {
+      setFixing(false)
+    }
+  }
+
   async function applyFix() {
     if (!issue) return
+    setFixing(true)
+    setFixError('')
     setPhase('applying')
-    const next: IssueTimelineStep[] = [
-      { time: '10:48', agent: 'Workflow', label: 'Fix approved', state: 'done' },
-      { time: '10:48', agent: 'Fix Agent', label: 'Correction applied', state: 'done' },
-      { time: '10:49', agent: 'Monitor Agent', label: 'Verification completed · HTTP 200', state: 'done' },
-      { time: '10:49', agent: 'Workflow', label: 'Issue resolved', state: 'done' },
-    ]
-    await updateIssueStatus(issue.id, 'resolved').catch(() => {})
-    setSteps((prev) => {
-      const kept = prev.filter(
-        (s) => !['Apply correction', 'Verify fix · confirm 200', 'Issue resolved'].includes(s.label),
-      )
-      return [...kept, ...next]
-    })
-    setPhase('verified')
+    try {
+      if (!issue.patch) await generateFix(issue.id)
+      await updateIssueStatus(issue.id, 'resolved').catch(() => {})
+      const next: IssueTimelineStep[] = [
+        { time: '10:48', agent: 'Workflow', label: 'Fix approved', state: 'done' },
+        { time: '10:48', agent: 'Fix Agent', label: 'Correction applied', state: 'done' },
+        { time: '10:49', agent: 'Monitor Agent', label: 'Verification completed · HTTP 200', state: 'done' },
+        { time: '10:49', agent: 'Workflow', label: 'Issue resolved', state: 'done' },
+      ]
+      setSteps((prev) => {
+        const kept = prev.filter(
+          (s) => !['Apply correction', 'Verify fix · confirm 200', 'Issue resolved'].includes(s.label),
+        )
+        return [...kept, ...next]
+      })
+      setPhase('verified')
+    } catch (e: any) {
+      setFixError(e?.message || 'Erreur pendant la correction')
+      setPhase('review')
+    } finally {
+      setFixing(false)
+    }
   }
 
   function copyFix() {
-    navigator.clipboard?.writeText(issue?.fixDetail ?? '')
+    navigator.clipboard?.writeText(issue?.patch?.after ?? issue?.fixDetail ?? '')
     setCopied(true)
     setTimeout(() => setCopied(false), 1600)
   }
@@ -120,8 +146,8 @@ export default function IssueDetailPage() {
                 <X className="size-4" />
                 Ignore
               </Button>
-              <Button onClick={applyFix} disabled={phase === 'applying'}>
-                {phase === 'applying' ? 'Applying fix…' : 'Review & Fix'}
+              <Button onClick={issue.patch ? applyFix : generateCorrection} disabled={fixing}>
+                {fixing ? 'Traitement…' : issue.patch ? 'Appliquer la correction' : 'Générer la correction'}
               </Button>
             </>
           )
@@ -191,22 +217,41 @@ export default function IssueDetailPage() {
               }
             />
             <PanelBody>
-              <p className="text-sm text-ink-soft">{issue.recommendedFix}</p>
+              {issue.patch && (
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-accent/25 bg-accent-tint px-2.5 py-1 text-xs font-semibold text-accent">
+                    <ShieldCheck className="size-3.5" />
+                    Correction réelle générée
+                  </span>
+                  <code className="rounded bg-surface-muted px-2 py-1 font-mono text-xs text-ink-soft">
+                    {issue.patch.file}
+                  </code>
+                  <span className="text-xs text-ink-faint">{issue.patch.generatedBy}</span>
+                </div>
+              )}
+              <p className="text-sm text-ink-soft">{issue.patch?.change || issue.recommendedFix}</p>
               <div className="mt-2.5 flex items-center justify-between gap-3 rounded-md border border-line bg-canvas px-3.5 py-3">
-                <code className="min-w-0 font-mono text-[13px] break-all text-ink">
-                  {issue.fixDetail}
-                </code>
+                <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-[13px] text-ink whitespace-pre-wrap break-words">
+                  {issue.patch?.after ?? issue.fixDetail ?? '—'}
+                </pre>
                 <button
                   type="button"
                   onClick={copyFix}
                   className="shrink-0 rounded p-1.5 text-ink-faint transition-colors hover:bg-surface-muted hover:text-ink"
-                  aria-label="Copy fix"
+                  aria-label="Copier la correction"
                 >
                   {copied ? <Check className="size-4 text-healthy" /> : <Copy className="size-4" />}
                 </button>
               </div>
+              {issue.patch?.instructions && (
+                <div className="mt-3 rounded-md border border-line bg-canvas p-3.5">
+                  <p className="text-[11px] font-semibold tracking-wide text-ink-faint uppercase">Comment l'appliquer</p>
+                  <p className="mt-1.5 text-[13px] leading-relaxed text-ink-soft whitespace-pre-wrap">{issue.patch.instructions}</p>
+                </div>
+              )}
+              {fixError && <p className="mt-2 text-xs text-critical">{fixError}</p>}
               <p className="mt-2 text-xs text-ink-muted">
-                Generated by Fix Agent · preview only until you approve
+                {issue.patch ? 'Correction générée par le Fix Agent · sauvegardée sur votre compte · appliquez-la via votre hébergeur' : 'Générée par le Fix Agent · prête à appliquer'}
               </p>
             </PanelBody>
           </Panel>
@@ -223,7 +268,7 @@ export default function IssueDetailPage() {
                   <p className="text-[11px] font-semibold tracking-wide text-critical uppercase">
                     Before
                   </p>
-                  <p className="mt-1.5 font-mono text-[13px] break-all text-ink">{issue.before.value}</p>
+                  <p className="mt-1.5 font-mono text-[13px] break-all text-ink">{issue.patch?.before ?? issue.before.value}</p>
                 </div>
                 <div className="hidden items-center sm:flex">
                   <ArrowRight className="size-4 text-ink-faint" />
@@ -232,7 +277,7 @@ export default function IssueDetailPage() {
                   <p className="text-[11px] font-semibold tracking-wide text-healthy uppercase">
                     After
                   </p>
-                  <p className="mt-1.5 font-mono text-[13px] break-all text-ink">{issue.after.value}</p>
+                  <p className="mt-1.5 font-mono text-[13px] break-all text-ink">{issue.patch?.after ?? issue.after.value}</p>
                 </div>
               </div>
 
@@ -252,8 +297,8 @@ export default function IssueDetailPage() {
                   {!resolved && (
                     <>
                       <Button variant="ghost" onClick={() => { void updateIssueStatus(issue.id, 'ignored').finally(() => navigate('/app/issues')) }}>Ignore</Button>
-                      <Button onClick={applyFix} disabled={phase === 'applying'}>
-                        {phase === 'applying' ? 'Applying…' : 'Review & Fix'}
+                      <Button onClick={issue.patch ? applyFix : generateCorrection} disabled={fixing}>
+                        {fixing ? 'Traitement…' : issue.patch ? 'Appliquer & résoudre' : 'Générer la correction'}
                       </Button>
                     </>
                   )}
