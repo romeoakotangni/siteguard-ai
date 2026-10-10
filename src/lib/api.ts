@@ -12,7 +12,12 @@ async function request<T = any>(path: string, options: RequestInit = {}): Promis
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data?.error || `HTTP ${res.status}`);
+    const err: any = new Error(data?.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.upgrade = Boolean(data?.details?.upgrade);
+    err.code = data?.details?.plan || null;
+    err.limit = data?.details?.limit || null;
+    throw err;
   }
   return (data && typeof data === 'object' && 'data' in data ? data.data : data) as T;
 }

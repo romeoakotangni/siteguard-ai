@@ -106,6 +106,7 @@ interface Subscription {
   planName: string
   priceCfa: number
   periodEnd: string | null
+  trialEndsAt: string | null
   cancelAtPeriodEnd: boolean
   provider: string
 }
@@ -131,14 +132,16 @@ export interface Realtime {
   pricingPlans: Plan[]
   agents: any[]
   automations: any[]
-  subscription: Subscription | null
-  payments: any[]
-  usage: UsageInfo | null
-  lastScan: { websiteId: string; ok: boolean; message: string } | null
+subscription: Subscription | null
+    payments: any[]
+    usage: UsageInfo | null
+    paywall: { message: string } | null
+    lastScan: { websiteId: string; ok: boolean; message: string } | null
   getSite: (id: string) => Website | undefined
   getIssue: (id: string) => Issue | undefined
   siteIssues: (siteId: string) => Issue[]
   refresh: () => Promise<void>
+  clearPaywall: () => void
   connectWebsite: (input: { url: string; name?: string; client?: string }) => Promise<any>
   scanWebsite: (websiteId: string) => Promise<any>
   deleteWebsite: (websiteId: string) => Promise<any>
@@ -247,11 +250,11 @@ function toPlan(row: any, current: string | null, index: number): Plan {
   const byCode: Record<string, { desc: string; features: string[] }> = {
     starter: {
       desc: 'For freelancers watching a handful of sites.',
-      features: ['3 websites', 'Monitor + SEO + Form agents', 'Daily scans', 'AI diagnosis', '10 auto-fixes / month'],
+      features: ['1 website', 'Monitor + SEO + Form agents', 'Daily scans', 'AI diagnosis', '10 auto-fixes / month'],
     },
     pro: {
       desc: 'For agencies that need fixes, not just alerts.',
-      features: ['15 websites', 'All 6 AI agents', 'Hourly scans + deploy watch', 'Approval workflow & automations', 'Unlimited auto-fixes', 'Weekly client reports'],
+      features: ['50 websites', 'All 6 AI agents', 'Hourly scans + deploy watch', 'Approval workflow & automations', 'Unlimited auto-fixes', 'Weekly client reports'],
     },
     agency: {
       desc: 'For teams running 50 to 100 client sites.',
@@ -276,9 +279,10 @@ function toPlan(row: any, current: string | null, index: number): Plan {
 
 function buildWorkspace(me: any, billing: any): WorkspaceInfo {
   const sub = billing?.subscription
+  const plan = sub?.status === 'trial' ? `Essai ${sub.planName || 'Pro'}` : sub?.planName || 'Starter'
   return {
     name: me?.workspace?.name || 'My Workspace',
-    plan: sub?.planName || 'Starter',
+    plan,
     user: { name: me?.user?.name || '', email: me?.user?.email || '', role: 'Owner' },
   }
 }
@@ -319,6 +323,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     subscription: Subscription | null
     payments: any[]
     usage: UsageInfo | null
+    paywall: { message: string } | null
     lastScan: Realtime['lastScan']
   }>({
     loaded: false,
@@ -335,6 +340,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     subscription: null,
     payments: [],
     usage: null,
+    paywall: null,
     lastScan: null,
   })
 
@@ -389,11 +395,24 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   const getIssue = useCallback((id: string) => state.issues.find((i) => i.id === id), [state.issues])
   const siteIssues = useCallback((siteId: string) => state.issues.filter((i) => i.siteId === siteId), [state.issues])
 
-  const connectWebsite = useCallback(async (input: { url: string; name?: string; client?: string }) => {
-    const r = await api.websites.create(input)
-    await refresh()
-    return r
-  }, [refresh])
+  const markPaywall = useCallback((e: any) => {
+    if (e && (e.upgrade || (e.status === 402 || e.status === 429))) {
+      setState((s) => ({ ...s, paywall: { message: e.message || 'Passez à Pro pour débloquer cette fonctionnalité.' } }))
+    }
+  }, [])
+
+  const guard = useCallback(async (fn: () => Promise<any>) => {
+    try {
+      const r = await fn()
+      await refresh()
+      return r
+    } catch (e: any) {
+      markPaywall(e)
+      throw e
+    }
+  }, [markPaywall, refresh])
+
+  const connectWebsite = useCallback(async (input: { url: string; name?: string; client?: string }) => guard(() => api.websites.create(input)), [guard])
 
   const scanWebsite = useCallback(async (websiteId: string) => {
     setState((s) => ({ ...s, refreshing: true }))
@@ -404,22 +423,15 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       return r
     } catch (e: any) {
       setState((s) => ({ ...s, lastScan: { websiteId, ok: false, message: e?.message || 'Scan failed' } }))
+      markPaywall(e)
       await refresh()
       throw e
     }
-  }, [refresh])
+  }, [refresh, markPaywall])
 
-  const deleteWebsite = useCallback(async (websiteId: string) => {
-    const r = await api.websites.delete(websiteId)
-    await refresh()
-    return r
-  }, [refresh])
+  const deleteWebsite = useCallback(async (websiteId: string) => guard(() => api.websites.delete(websiteId)), [guard])
 
-  const updateIssueStatus = useCallback(async (issueId: string, status: string) => {
-    const r = await api.issues.update({ issueId, status })
-    await refresh()
-    return r
-  }, [refresh])
+  const updateIssueStatus = useCallback(async (issueId: string, status: string) => guard(() => api.issues.update({ issueId, status })), [guard])
 
   const markNotificationsRead = useCallback(async (id?: string) => {
     const r = await api.notifications.read(id)
@@ -427,23 +439,17 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     return r
   }, [refresh])
 
-  const toggleAutomation = useCallback(async (id: string, enabled: boolean) => {
-    const r = await api.automations.update({ id, enabled })
-    await refresh()
-    return r
-  }, [refresh])
+  const toggleAutomation = useCallback(async (id: string, enabled: boolean) => guard(() => api.automations.update({ id, enabled })), [guard])
 
-  const subscribe = useCallback(async (planCode: string) => {
-    const r = await api.checkout.subscribe({ plan_code: planCode })
-    await refresh()
-    return r
-  }, [refresh])
+  const subscribe = useCallback(async (planCode: string) => guard(() => api.checkout.subscribe({ plan_code: planCode })), [guard])
 
   const updateProfile = useCallback(async (name: string) => {
     const r = await api.users.profile({ name })
     await refresh()
     return r
   }, [refresh])
+
+  const clearPaywall = useCallback(() => setState((s) => ({ ...s, paywall: null })), [])
 
   const value = useMemo<Realtime>(
     () => ({
@@ -453,6 +459,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       getIssue,
       siteIssues,
       refresh,
+      clearPaywall,
       connectWebsite,
       scanWebsite,
       deleteWebsite,
@@ -462,7 +469,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       subscribe,
       updateProfile,
     }),
-    [state, getSite, getIssue, siteIssues, refresh, connectWebsite, scanWebsite, deleteWebsite, updateIssueStatus, markNotificationsRead, toggleAutomation, subscribe, updateProfile],
+    [state, getSite, getIssue, siteIssues, refresh, clearPaywall, connectWebsite, scanWebsite, deleteWebsite, updateIssueStatus, markNotificationsRead, toggleAutomation, subscribe, updateProfile],
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

@@ -79,6 +79,23 @@ export default function BillingPage() {
         }
       />
 
+      {subscription?.status === 'trial' && (
+        <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-accent/25 bg-accent-tint px-4 py-3 text-[13px] text-ink">
+          <span className="font-semibold text-accent">Essai Pro en cours</span>
+          <span className="text-ink-muted">
+            {subscription.trialEndsAt
+              ? `Se termine le ${new Date(subscription.trialEndsAt).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}. `
+              : ''}
+            Après l'essai, vous repassez au plan Starter gratuit (1 site, 1 scan/jour).
+          </span>
+          <span className="ml-auto">
+            <Button size="sm" onClick={() => choosePlan(pricingPlans.find((p) => !p.highlighted && p.priceCfa > 0) ?? pricingPlans[pricingPlans.length - 1])} disabled={busy !== null}>
+              {busy ? 'Paiement…' : 'Sécuriser dès maintenant'}
+            </Button>
+          </span>
+        </div>
+      )}
+
       <div className="mb-5 grid gap-5 lg:grid-cols-3">
         <Panel>
           <PanelHeader title="Current plan" />

@@ -4,6 +4,7 @@ import { BottomNav, MobileNav, Topbar } from './Topbar'
 import { Sidebar } from './Sidebar'
 import { ScrollProgress } from '../motion/ScrollProgress'
 import { useRealtime } from '../../lib/realtime'
+import PaywallBanner from './PaywallBanner'
 
 function LiveRefresh() {
   const { refresh } = useRealtime()
@@ -31,6 +32,7 @@ export default function AppLayout() {
 
         <div className="flex min-w-0 flex-1 flex-col">
           <Topbar onOpenMobileNav={() => setMobileNav(true)} />
+          <PaywallBanner />
           <main
             key={location.pathname}
             className="mx-auto w-full max-w-7xl flex-1 px-4 pt-6 pb-24 md:px-6 lg:pb-12 animate-fade-up"

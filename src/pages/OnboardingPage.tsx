@@ -26,6 +26,7 @@ export default function OnboardingPage() {
   const [activeStep, setActiveStep] = useState(step)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
+  const [upgrade, setUpgrade] = useState(false)
   const [result, setResult] = useState<any>(null)
   const { user } = useAuth()
   const { connectWebsite, issues } = useRealtime()
@@ -64,6 +65,7 @@ export default function OnboardingPage() {
     }
     if (!url.trim()) return
     setError('')
+    setUpgrade(false)
     setResult(null)
     setProgress(0)
     setStep(2)
@@ -78,7 +80,10 @@ export default function OnboardingPage() {
         }
         setResult(body)
       })
-      .catch((e: any) => setError(e?.message || 'Le scan a échoué'))
+      .catch((e: any) => {
+        setUpgrade(Boolean(e?.upgrade))
+        setError(e?.message || 'Le scan a échoué')
+      })
       .finally(() => setPending(false))
   }
 
@@ -160,6 +165,11 @@ export default function OnboardingPage() {
                 {error && (
                   <p className="rounded-md border border-critical/25 bg-critical-tint px-3 py-2 text-[13px] text-critical">
                     {error}
+                    {upgrade && (
+                      <Link to="/app/billing" className="ml-2 font-semibold text-accent underline">
+                        Passer à Pro
+                      </Link>
+                    )}
                   </p>
                 )}
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

@@ -99,17 +99,48 @@ async function firstWorkspace(userId) {
   return r.rows[0]?.id || null;
 }
 
-async function hasActiveSubscription(userId) {
-  const r = await sql`
-    SELECT 1 FROM subscriptions
-    WHERE user_id=${userId}
-      AND status='active'
-      AND (current_period_end IS NULL OR current_period_end > NOW())
-    ORDER BY created_at DESC
-    LIMIT 1
-  `;
-  return r.rows.length > 0;
+const ADVANCED_AGENTS = new Set(['performance', 'security', 'fix']);
+
+function planLimits(code, rowLimits) {
+  const paid = code !== 'starter';
+  return {
+    websites: (rowLimits && rowLimits.websites) || (paid ? 50 : 1),
+    scansPerDay: paid ? 999 : 1,
+    autoFixesPerMonth: paid ? Number.POSITIVE_INFINITY : 10,
+    agents: paid ? 'advanced' : 'basic',
+  };
 }
+
+async function getEffectivePlan(userId) {
+  const now = new Date();
+  const r = await sql`
+    SELECT s.status, s.trial_ends_at, s.current_period_end, p.code, p.limits, p.name
+    FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+    WHERE s.user_id=${userId} AND s.status IN ('active','trial')
+    ORDER BY s.created_at DESC LIMIT 1
+  `;
+  const row = r.rows[0];
+  const starter = { code: 'starter', name: 'Starter', status: 'none', trialEndsAt: null, limits: planLimits('starter', {}) };
+  if (!row) return starter;
+  const expiredTrial = row.status === 'trial' && row.trial_ends_at && new Date(row.trial_ends_at) < now;
+  const expiredPeriod = row.status === 'active' && row.current_period_end && new Date(row.current_period_end) < now;
+  if (expiredTrial) {
+    await sql`UPDATE subscriptions SET status='expired', updated_at=NOW() WHERE user_id=${userId} AND status='trial'`;
+    return starter;
+  }
+  if (expiredPeriod) {
+    await sql`UPDATE subscriptions SET status='expired', updated_at=NOW() WHERE user_id=${userId} AND status='active'`;
+    return starter;
+  }
+  return {
+    code: row.code, name: row.name, status: row.status,
+    trialEndsAt: row.trial_ends_at || null,
+    limits: planLimits(row.code, row.limits),
+  };
+}
+
+const paywall = (res, planData, message, status) =>
+  KO(res, message, status, { upgrade: true, plan: planData.code, limit: planData.limits.websites });
 
 const DEFAULT_AGENTS = [
   { name: 'Monitor Agent', type: 'monitor', config: { role: 'Watches availability, HTTP errors and downtime.', scope: 'Every 60 seconds' } },
@@ -432,9 +463,24 @@ async function register(req, res) {
     const token = signToken(user);
     setAuthCookie(res, token);
     await seedWorkspaceData(workspace.rows[0].id);
+    try {
+      const pro = await sql`SELECT id FROM plans WHERE code='pro' LIMIT 1`;
+      if (pro.rows[0]) {
+        await sql`
+          INSERT INTO subscriptions (user_id, workspace_id, plan_id, status, provider, trial_ends_at, current_period_start, current_period_end)
+          VALUES (${user.id}, ${workspace.rows[0].id}, ${pro.rows[0].id}, 'trial', 'manual', NOW() + INTERVAL '14 days', NOW(), NOW() + INTERVAL '14 days')
+        `;
+        await sql`
+          INSERT INTO notifications (user_id, title, body, type)
+          VALUES (${user.id}, 'Essai Pro de 14 jours activé', 'Toutes les fonctionnalités sont disponibles pendant 14 jours. Choisissez votre plan avant la fin de l''essai pour continuer.', 'success')
+        `;
+      }
+    } catch (e) {
+      console.error('trial:', e?.message);
+    }
     return OK(
       res,
-      { user: { id: user.id, name: user.name, email: user.email, role: user.role }, token, workspace: workspace.rows[0] },
+      { user: { id: user.id, name: user.name, email: user.email, role: user.role }, token, workspace: workspace.rows[0], trial: true },
       201
     );
   } catch (e) {
@@ -651,8 +697,10 @@ async function agentRun(req, res) {
 
     const workspaceId = await firstWorkspace(user.id);
     if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
-    if (!(await hasActiveSubscription(user.id)))
-      return KO(res, 'Abonnement requis pour utiliser cet outil', 403);
+    const planData = await getEffectivePlan(user.id);
+    if (planData.limits.agents === 'basic' && ADVANCED_AGENTS.has(agentType)) {
+      return paywall(res, planData, `Les agents ${agentType} sont réservés au plan Pro. Passez à Pro pour les débloquer.`, 402);
+    }
 
     if (agentId) {
       const a = await sql`SELECT id, type, status FROM agents WHERE id=${agentId} AND workspace_id=${workspaceId}`;
@@ -1444,6 +1492,8 @@ async function websitesCreate(req, res) {
     const workspaceId = await firstWorkspace(user.id);
     if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
 
+    const planData = await getEffectivePlan(user.id);
+
     const dup = await sql`SELECT id FROM websites WHERE workspace_id=${workspaceId} AND domain=${domain}`;
     if (dup.rows.length > 0) {
       const wid = dup.rows[0].id;
@@ -1454,11 +1504,12 @@ async function websitesCreate(req, res) {
       return OK(res, { website: refreshed.rows[0], scan, scanned: true }, 201);
     }
 
-    const plan = await sql`
-      SELECT pl.code FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id
-      WHERE s.user_id=${user.id} AND s.status='active' ORDER BY s.created_at DESC LIMIT 1
-    `;
-    const planName = plan.rows[0]?.code ? plan.rows[0].code[0].toUpperCase() + plan.rows[0].code.slice(1) : 'Starter';
+    const count = await sql`SELECT count(*)::int AS n FROM websites WHERE workspace_id=${workspaceId}`;
+    if ((count.rows[0]?.n || 0) >= planData.limits.websites) {
+      return paywall(res, planData, `Limite du plan ${planData.name} : ${planData.limits.websites} site(s) surveillé(s). Passez à Pro pour en suivre davantage.`, 402);
+    }
+
+    const planName = planData.code[0]?.toUpperCase?.() + (planData.code ? planData.code.slice(1) : '') || 'Starter';
     const insert = await sql`
       INSERT INTO websites (workspace_id, domain, name, client, status, health_score, plan, connected_at, response_ms, uptime)
       VALUES (${workspaceId}, ${domain}, ${name || domain}, ${client || ''}, 'scanning', 0, ${planName}, NOW(), 0, '—')
@@ -1487,6 +1538,13 @@ async function websitesScan(req, res, direct) {
     if (!workspaceId) return KO(res, 'Workspace introuvable', 404);
     const site = await sql`SELECT * FROM websites WHERE id=${websiteId} AND workspace_id=${workspaceId}`;
     if (site.rows.length === 0) return KO(res, 'Site introuvable', 404);
+    const planData = await getEffectivePlan(user.id);
+    if (planData.limits.scansPerDay < 999 && site.rows[0].last_scan_at) {
+      const hoursSince = (Date.now() - new Date(site.rows[0].last_scan_at).getTime()) / 3.6e6;
+      if (hoursSince < 24) {
+        return paywall(res, planData, `Scans limités à 1 par jour sur le plan ${planData.name}. Passez à Pro pour des scans fréquents (24 h restantes).`, 429);
+      }
+    }
     await sql`UPDATE websites SET status='scanning', updated_at=NOW() WHERE id=${websiteId}`;
     const scan = await runSmartScan({ id: workspaceId, owner_id: user.id }, site.rows[0]);
     const refreshed = await sql`SELECT * FROM websites WHERE id=${websiteId}`;
@@ -1546,6 +1604,16 @@ async function issuesUpdate(req, res) {
     const dbStatus = allowed[status];
     if (!dbStatus) return KO(res, 'Statut invalide');
     const workspaceId = await firstWorkspace(user.id);
+    const planData = await getEffectivePlan(user.id);
+    if (dbStatus === 'resolved' && planData.limits.autoFixesPerMonth < Number.POSITIVE_INFINITY) {
+      const used = await sql`
+        SELECT count(*)::int AS n FROM issues
+        WHERE workspace_id=${workspaceId} AND status='resolved' AND resolved_at >= date_trunc('month', NOW())
+      `;
+      if ((used.rows[0]?.n || 0) >= planData.limits.autoFixesPerMonth) {
+        return paywall(res, planData, `Quota d'autocorrections mensuel atteint (${planData.limits.autoFixesPerMonth}). Passez à Pro pour des corrections illimitées.`, 402);
+      }
+    }
     let r;
     if (dbStatus === 'resolved') {
       r = await sql`
@@ -1701,8 +1769,9 @@ async function billingSummary(req, res) {
   if (!requireMethod(req, res, 'GET')) return;
   try {
     const workspaceId = await firstWorkspace(user.id);
+    const planData = await getEffectivePlan(user.id);
     const sub = await sql`
-      SELECT s.status, s.current_period_end, s.cancel_at_period_end, s.provider, p.code, p.name, p.price_cfa, p.features, p.limits
+      SELECT s.status, s.current_period_end, s.cancel_at_period_end, s.provider, s.trial_ends_at, p.code, p.name, p.price_cfa, p.features, p.limits
       FROM subscriptions s JOIN plans p ON p.id = s.plan_id
       WHERE s.user_id=${user.id} ORDER BY s.created_at DESC LIMIT 1
     `;
@@ -1712,12 +1781,15 @@ async function billingSummary(req, res) {
     const openIssues = await sql`SELECT count(*)::int AS n FROM issues WHERE workspace_id=${workspaceId} AND status IN ('open','in_progress')`;
     const resolved = await sql`SELECT count(*)::int AS n FROM issues WHERE workspace_id=${workspaceId} AND status='resolved'`;
     const s = sub.rows[0];
+    const hasEntitlement = planData.status !== 'none';
     return OK(res, {
-      subscription: s ? { status: s.status, planCode: s.code, planName: s.name, priceCfa: s.price_cfa, periodEnd: s.current_period_end, cancelAtPeriodEnd: s.cancel_at_period_end, provider: s.provider } : null,
+      subscription: hasEntitlement
+        ? { status: planData.status, planCode: planData.code, planName: planData.name, priceCfa: s?.price_cfa ?? (planData.code === 'starter' ? 0 : 50000), periodEnd: s?.current_period_end ?? planData.trialEndsAt, trialEndsAt: planData.trialEndsAt, cancelAtPeriodEnd: s?.cancel_at_period_end ?? false, provider: s?.provider ?? 'manual' }
+        : null,
       payments: payments.rows,
       usage: {
         websites: sites.rows[0]?.n || 0,
-        websitesMax: s?.limits?.websites ?? 0,
+        websitesMax: planData.limits.websites,
         scans: scans.rows[0]?.n || 0,
         openIssues: openIssues.rows[0]?.n || 0,
         resolved: resolved.rows[0]?.n || 0,
